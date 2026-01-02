@@ -1,0 +1,472 @@
+openapi: 3.0.3
+info:
+  title: PBX Control Portal API
+  description: |
+    Backend API for managing Asterisk PBX users, extensions, and configuration.
+
+    MVP features:
+    - Create users with automatic extension allocation (1000-1999)
+    - Apply configuration changes to Asterisk server
+    - List all users and their extensions
+    - Delete users and free their extensions
+
+    Constitution compliance:
+    - File-based Asterisk configuration (no Realtime)
+    - Atomic file writes (temp → rename)
+    - Explicit apply pattern (no auto-reload)
+    - No hardcoded secrets (env vars)
+  version: 1.0.0
+  contact:
+    name: PBX Control Portal
+
+servers:
+  - url: http://localhost:8000
+    description: Local development server
+
+tags:
+  - name: users
+    description: User management operations
+  - name: apply
+    description: Configuration apply operations
+
+paths:
+  /users:
+    get:
+      tags:
+        - users
+      summary: List all users
+      description: Retrieve all users with their assigned extensions
+      operationId: listUsers
+      responses:
+        '200':
+          description: List of users retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/User'
+              example:
+                users:
+                  - id: "550e8400-e29b-41d4-a716-446655440000"
+                    tenant_id: "a0000000-0000-0000-0000-000000000000"
+                    name: "John Doe"
+                    email: "john.doe@example.com"
+                    extension:
+                      number: 1000
+                      secret: "kJ8n3mQ-x7Lp9Rt2"
+                    created_at: "2026-01-01T10:00:00Z"
+                  - id: "660e8400-e29b-41d4-a716-446655440001"
+                    tenant_id: "a0000000-0000-0000-0000-000000000000"
+                    name: "Jane Smith"
+                    email: "jane.smith@example.com"
+                    extension:
+                      number: 1001
+                      secret: "mN2p7qR-y8Mt3Sv4"
+                    created_at: "2026-01-01T10:05:00Z"
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      tags:
+        - users
+      summary: Create a new user
+      description: |
+        Create a new user and automatically allocate an extension from the range 1000-1999.
+        Extension allocation uses lowest available number (handles gaps from deletions).
+      operationId: createUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+            example:
+              name: "Alice Johnson"
+              email: "alice.johnson@example.com"
+      responses:
+        '201':
+          description: User created successfully with allocated extension
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+              example:
+                id: "770e8400-e29b-41d4-a716-446655440002"
+                tenant_id: "a0000000-0000-0000-0000-000000000000"
+                name: "Alice Johnson"
+                email: "alice.johnson@example.com"
+                extension:
+                  number: 1002
+                  secret: "pQ4r9tS-z1Nv5Wx6"
+                created_at: "2026-01-01T10:10:00Z"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Extension pool exhausted (all 1000 extensions allocated)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Extension pool exhausted"
+                message: "All extensions in range 1000-1999 are allocated. Delete users to free extensions."
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /users/{userId}:
+    delete:
+      tags:
+        - users
+      summary: Delete a user
+      description: |
+        Delete a user and free their extension for reuse.
+        Note: User is removed from database immediately, but Asterisk config still contains
+        their endpoint until next Apply operation (eventual consistency).
+      operationId: deleteUser
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          description: UUID of the user to delete
+          schema:
+            type: string
+            format: uuid
+          example: "770e8400-e29b-41d4-a716-446655440002"
+      responses:
+        '200':
+          description: User deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  deleted_user_id:
+                    type: string
+                    format: uuid
+                  freed_extension:
+                    type: integer
+              example:
+                message: "User deleted successfully"
+                deleted_user_id: "770e8400-e29b-41d4-a716-446655440002"
+                freed_extension: 1002
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "User not found"
+                message: "No user exists with ID 770e8400-e29b-41d4-a716-446655440002"
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /apply:
+    post:
+      tags:
+        - apply
+      summary: Apply configuration to Asterisk
+      description: |
+        Generate Asterisk configuration files from current database state and reload Asterisk.
+
+        Process:
+        1. Acquire advisory lock (serialize concurrent applies)
+        2. Read all users/extensions from database
+        3. Generate PJSIP config (endpoint+auth+aor per extension)
+        4. Generate dialplan config ([synergy-internal] context with Dial() per extension)
+        5. Write files atomically (temp → rename) to:
+           - /etc/asterisk/pjsip.d/synergycall/generated_endpoints.conf
+           - /etc/asterisk/extensions.d/synergycall/generated_routing.conf
+        6. Reload Asterisk via local subprocess:
+           - subprocess.run(["asterisk", "-rx", "pjsip reload"])
+           - subprocess.run(["asterisk", "-rx", "dialplan reload"])
+        7. Record audit log entry
+        8. Release advisory lock
+
+        Note: Portal runs co-located with Asterisk on same host (no remote SSH)
+
+        Constitution compliance:
+        - Atomic file writes (principle III)
+        - Explicit apply only (principle IV)
+        - Include files only (principle II)
+      operationId: applyConfiguration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApplyRequest'
+            example:
+              triggered_by: "admin@example.com"
+      responses:
+        '200':
+          description: Configuration applied successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplyResponse'
+              example:
+                message: "Configuration applied successfully"
+                audit_log_id: "880e8400-e29b-41d4-a716-446655440003"
+                files_written:
+                  - "/etc/asterisk/pjsip.d/synergycall/generated_endpoints.conf"
+                  - "/etc/asterisk/extensions.d/synergycall/generated_routing.conf"
+                reload_results:
+                  pjsip_reload:
+                    exit_code: 0
+                    stdout: "PJSIP reload completed"
+                  dialplan_reload:
+                    exit_code: 0
+                    stdout: "Dialplan reload completed"
+                users_applied: 3
+                extensions_generated: 3
+        '409':
+          description: Another apply operation is in progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Apply in progress"
+                message: "Another apply operation is currently running. Please wait and retry."
+        '500':
+          description: Apply failed (file write error, Asterisk reload failure, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplyErrorResponse'
+              example:
+                error: "Apply operation failed"
+                message: "Asterisk reload command failed"
+                audit_log_id: "990e8400-e29b-41d4-a716-446655440004"
+                error_details: "Command 'asterisk -rx pjsip reload' returned non-zero exit status 1: Unable to connect to remote asterisk"
+                files_written:
+                  - "/etc/asterisk/pjsip.d/synergycall/generated_endpoints.conf"
+                  - "/etc/asterisk/extensions.d/synergycall/generated_routing.conf"
+                reload_results:
+                  pjsip_reload:
+                    exit_code: 1
+                    stderr: "Unable to connect to remote asterisk (does /var/run/asterisk/asterisk.ctl exist?)"
+
+components:
+  schemas:
+    User:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - name
+        - email
+        - extension
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique user identifier
+        tenant_id:
+          type: string
+          format: uuid
+          description: Tenant this user belongs to (always default tenant in MVP)
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: User full name
+        email:
+          type: string
+          format: email
+          maxLength: 255
+          description: User email address (unique)
+        extension:
+          $ref: '#/components/schemas/Extension'
+        created_at:
+          type: string
+          format: date-time
+          description: User creation timestamp (ISO 8601)
+
+    Extension:
+      type: object
+      required:
+        - number
+        - secret
+      properties:
+        number:
+          type: integer
+          minimum: 1000
+          maximum: 1999
+          description: SIP extension number
+        secret:
+          type: string
+          description: SIP authentication password (used in PJSIP auth config)
+          example: "kJ8n3mQ-x7Lp9Rt2"
+
+    CreateUserRequest:
+      type: object
+      required:
+        - name
+        - email
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: User full name
+          example: "Bob Wilson"
+        email:
+          type: string
+          format: email
+          maxLength: 255
+          description: User email address (must be unique)
+          example: "bob.wilson@example.com"
+
+    ApplyRequest:
+      type: object
+      required:
+        - triggered_by
+      properties:
+        triggered_by:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Identifier of admin triggering apply (e.g., email or username)
+          example: "admin@example.com"
+
+    ApplyResponse:
+      type: object
+      required:
+        - message
+        - audit_log_id
+        - files_written
+        - reload_results
+        - users_applied
+        - extensions_generated
+      properties:
+        message:
+          type: string
+          example: "Configuration applied successfully"
+        audit_log_id:
+          type: string
+          format: uuid
+          description: ID of the audit log entry created for this apply
+        files_written:
+          type: array
+          items:
+            type: string
+          description: Absolute paths of config files written
+          example:
+            - "/etc/asterisk/pjsip.d/synergycall/generated_endpoints.conf"
+            - "/etc/asterisk/extensions.d/synergycall/generated_routing.conf"
+        reload_results:
+          type: object
+          description: Results of Asterisk reload commands
+          properties:
+            pjsip_reload:
+              $ref: '#/components/schemas/ReloadResult'
+            dialplan_reload:
+              $ref: '#/components/schemas/ReloadResult'
+        users_applied:
+          type: integer
+          description: Number of users included in generated config
+          example: 3
+        extensions_generated:
+          type: integer
+          description: Number of extensions in generated config
+          example: 3
+
+    ApplyErrorResponse:
+      type: object
+      required:
+        - error
+        - message
+        - audit_log_id
+        - error_details
+      properties:
+        error:
+          type: string
+          example: "Apply operation failed"
+        message:
+          type: string
+          example: "Asterisk reload command failed"
+        audit_log_id:
+          type: string
+          format: uuid
+          description: ID of the audit log entry (outcome=failure)
+        error_details:
+          type: string
+          description: Detailed error message for troubleshooting
+        files_written:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Files written before failure (may be empty if write failed)
+        reload_results:
+          type: object
+          nullable: true
+          description: Partial reload results (may be null if reload not attempted)
+
+    ReloadResult:
+      type: object
+      required:
+        - exit_code
+      properties:
+        exit_code:
+          type: integer
+          nullable: true
+          description: SSH command exit code (0 = success, null = command not executed)
+          example: 0
+        stdout:
+          type: string
+          nullable: true
+          description: Standard output from command
+        stderr:
+          type: string
+          nullable: true
+          description: Standard error from command
+        error:
+          type: string
+          nullable: true
+          description: Error message if command execution failed
+
+    Error:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Short error identifier
+          example: "Validation error"
+        message:
+          type: string
+          description: Human-readable error message
+          example: "Email address is required"
+
+  responses:
+    BadRequest:
+      description: Invalid request (validation error)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Validation error"
+            message: "Email address is required and must be valid format"
+
+    InternalServerError:
+      description: Internal server error (database failure, unexpected error)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Internal server error"
+            message: "Database connection failed"
