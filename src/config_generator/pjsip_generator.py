@@ -105,7 +105,7 @@ class PJSIPGenerator:
 
         The endpoint defines SIP protocol settings for the extension.
         """
-        return f"""[{extension_number}](!)
+        return f"""[{extension_number}]
 type=endpoint
 context=synergy-internal
 disallow=all
@@ -121,7 +121,7 @@ aors={extension_number}"""
 
         The auth section contains authentication credentials.
         """
-        return f"""[{extension_number}](!)
+        return f"""[{extension_number}]
 type=auth
 auth_type=userpass
 username={extension_number}
@@ -134,7 +134,7 @@ password={secret}"""
 
         The AOR defines registration and contact handling.
         """
-        return f"""[{extension_number}](!)
+        return f"""[{extension_number}]
 type=aor
 max_contacts=3
 remove_existing=yes"""
