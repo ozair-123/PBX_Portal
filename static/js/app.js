@@ -113,7 +113,17 @@ async function applyConfigurationAPI() {
 
         if (!response.ok) {
             const errorData = await response.json();
-            throw new Error(errorData.detail || 'Failed to apply configuration');
+            // Handle both string and object error formats
+            let errorMessage = 'Failed to apply configuration';
+            if (typeof errorData.detail === 'string') {
+                errorMessage = errorData.detail;
+            } else if (errorData.detail && errorData.detail.error) {
+                errorMessage = errorData.detail.error;
+                if (errorData.detail.details) {
+                    errorMessage += ': ' + errorData.detail.details;
+                }
+            }
+            throw new Error(errorMessage);
         }
 
         const data = await response.json();
