@@ -210,20 +210,12 @@ class ApplyService:
             return result
 
         except Exception as e:
-            # Ensure lock is released on any error
-            if lock_acquired:
-                try:
-                    session.execute(
-                        text("SELECT pg_advisory_unlock(:lock_id)"),
-                        {"lock_id": ApplyService.APPLY_LOCK_ID}
-                    )
-                    logger.info("Advisory lock released after error")
-                except Exception as unlock_error:
-                    logger.error(f"Failed to release advisory lock: {str(unlock_error)}")
-
             # Create failure audit log if not already created
             if audit_log is None:
                 try:
+                    # Rollback any pending transaction before creating audit log
+                    session.rollback()
+
                     audit_log = ApplyAuditLog(
                         triggered_at=datetime.utcnow(),
                         triggered_by=triggered_by,
@@ -240,3 +232,21 @@ class ApplyService:
 
             logger.exception(f"Apply configuration failed: {str(e)}")
             raise
+
+        finally:
+            # CRITICAL: Always release the advisory lock, even if exception handling fails
+            if lock_acquired:
+                try:
+                    # Ensure session is in a clean state before unlocking
+                    session.rollback()
+
+                    session.execute(
+                        text("SELECT pg_advisory_unlock(:lock_id)"),
+                        {"lock_id": ApplyService.APPLY_LOCK_ID}
+                    )
+                    logger.info("Advisory lock released in finally block")
+                except Exception as unlock_error:
+                    logger.error(
+                        f"CRITICAL: Failed to release advisory lock in finally block: {str(unlock_error)}. "
+                        f"Manual cleanup may be required: SELECT pg_advisory_unlock({ApplyService.APPLY_LOCK_ID});"
+                    )
