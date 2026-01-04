@@ -42,17 +42,16 @@ class PJSIPRealtimeService:
             with get_mariadb_connection() as conn:
                 cursor = conn.cursor()
 
-                # Step 1: Delete all existing portal-managed endpoints
-                # We identify our endpoints by the context 'default'
-                delete_query = """
-                    DELETE e, a, o FROM ps_endpoints e
-                    LEFT JOIN ps_auths a ON e.id = a.id
-                    LEFT JOIN ps_aors o ON e.id = o.id
-                    WHERE e.context = 'default' AND e.id >= '1000' AND e.id <= '1999'
-                """
-                cursor.execute(delete_query)
+                # Step 1: Delete all existing portal-managed endpoints (1000-1999 range)
+                # Delete from all three tables regardless of context
+                logger.info("Deleting existing endpoints in range 1000-1999")
+
+                cursor.execute("DELETE FROM ps_endpoints WHERE id >= '1000' AND id <= '1999'")
+                cursor.execute("DELETE FROM ps_auths WHERE id >= '1000' AND id <= '1999'")
+                cursor.execute("DELETE FROM ps_aors WHERE id >= '1000' AND id <= '1999'")
+
                 deleted_count = cursor.rowcount
-                logger.info(f"Deleted {deleted_count} existing endpoints")
+                logger.info(f"Deleted existing endpoints in range 1000-1999")
 
                 # Step 2: Insert new endpoints
                 synced_count = 0
