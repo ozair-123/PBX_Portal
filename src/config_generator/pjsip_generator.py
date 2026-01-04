@@ -111,8 +111,8 @@ context=synergy-internal
 disallow=all
 allow=ulaw
 allow=alaw
-auth={extension_number}
-aors={extension_number}"""
+auth=auth-{extension_number}
+aors=aor-{extension_number}"""
 
     @staticmethod
     def _generate_auth(extension_number: int, secret: str) -> str:
@@ -121,7 +121,7 @@ aors={extension_number}"""
 
         The auth section contains authentication credentials.
         """
-        return f"""[{extension_number}]
+        return f"""[auth-{extension_number}]
 type=auth
 auth_type=userpass
 username={extension_number}
@@ -134,7 +134,7 @@ password={secret}"""
 
         The AOR defines registration and contact handling.
         """
-        return f"""[{extension_number}]
+        return f"""[aor-{extension_number}]
 type=aor
 max_contacts=3
 remove_existing=yes"""
