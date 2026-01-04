@@ -1,7 +1,10 @@
 """FastAPI application entry point."""
 
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse
 
 from .config import Config
 
@@ -39,6 +42,17 @@ from .api import users, apply
 
 app.include_router(users.router, prefix="/users", tags=["users"])
 app.include_router(apply.router, prefix="/apply", tags=["apply"])
+
+# Mount static files (admin panel)
+static_dir = Path(__file__).parent.parent / "static"
+if static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+
+@app.get("/")
+async def root():
+    """Redirect root to admin panel."""
+    return RedirectResponse(url="/static/index.html")
 
 
 if __name__ == "__main__":
