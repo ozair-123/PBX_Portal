@@ -42,7 +42,7 @@ async function fetchUsers() {
         }
 
         const data = await response.json();
-        return data;
+        return data.users || []; // API returns {users: [...]}
     } catch (error) {
         console.error('Error fetching users:', error);
         showToast('Error', 'Failed to load users', 'error');
