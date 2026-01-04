@@ -10,8 +10,15 @@ load_dotenv()
 class Config:
     """Application configuration."""
 
-    # Database
+    # PostgreSQL Database (for application data)
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+
+    # MariaDB Database (for Asterisk PJSIP Realtime)
+    MARIADB_HOST: str = os.getenv("MARIADB_HOST", "77.42.28.222")
+    MARIADB_PORT: int = int(os.getenv("MARIADB_PORT", "3306"))
+    MARIADB_USER: str = os.getenv("MARIADB_USER", "astdb")
+    MARIADB_PASSWORD: str = os.getenv("MARIADB_PASSWORD", "")
+    MARIADB_DATABASE: str = os.getenv("MARIADB_DATABASE", "asterisk")
 
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

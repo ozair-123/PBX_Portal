@@ -10,10 +10,10 @@ from sqlalchemy import text
 from ..models.user import User
 from ..models.apply_audit_log import ApplyAuditLog
 from ..config import Config
-from ..config_generator.pjsip_generator import PJSIPGenerator
 from ..config_generator.dialplan_generator import DialplanGenerator
 from ..config_generator.atomic_writer import AtomicFileWriter
 from ..asterisk.reloader import AsteriskReloader
+from .pjsip_realtime_service import PJSIPRealtimeService
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +24,11 @@ class ApplyService:
 
     This service orchestrates the complete apply workflow:
     1. Acquire PostgreSQL advisory lock (serialization)
-    2. Read all users and extensions from database
-    3. Generate PJSIP and dialplan configurations
-    4. Write configuration files atomically
-    5. Reload Asterisk modules
-    6. Create audit log entry
+    2. Read all users and extensions from PostgreSQL database
+    3. Sync PJSIP endpoints to MariaDB realtime tables
+    4. Generate and write dialplan configuration file
+    5. Reload Asterisk PJSIP and dialplan modules
+    6. Create audit log entry in PostgreSQL
     7. Release advisory lock
     """
 
@@ -119,25 +119,24 @@ class ApplyService:
                 f"Loaded {users_count} users with {extensions_count} extensions from database"
             )
 
-            # Step 3: Generate configuration files
-            logger.info("Generating PJSIP configuration")
-            pjsip_config = PJSIPGenerator.generate_config(users_with_extensions)
+            # Step 3: Sync PJSIP endpoints to MariaDB realtime
+            logger.info("Syncing PJSIP endpoints to MariaDB")
+            pjsip_sync_result = PJSIPRealtimeService.sync_endpoints(users_with_extensions)
 
             logger.info("Generating dialplan configuration")
             dialplan_config = DialplanGenerator.generate_config(users_with_extensions)
 
-            # Step 4: Write configuration files atomically
-            pjsip_path = Config.ASTERISK_PJSIP_CONFIG_PATH
+            # Step 4: Write dialplan configuration file
             dialplan_path = Config.ASTERISK_DIALPLAN_CONFIG_PATH
-
-            logger.info(f"Writing PJSIP config to {pjsip_path}")
-            AtomicFileWriter.write_atomic(pjsip_config, pjsip_path)
 
             logger.info(f"Writing dialplan config to {dialplan_path}")
             AtomicFileWriter.write_atomic(dialplan_config, dialplan_path)
 
-            files_written = [pjsip_path, dialplan_path]
-            logger.info(f"Configuration files written successfully: {files_written}")
+            files_written = [dialplan_path]
+            logger.info(
+                f"Synced {pjsip_sync_result['endpoints_synced']} PJSIP endpoints to MariaDB, "
+                f"wrote dialplan to {dialplan_path}"
+            )
 
             # Step 5: Reload Asterisk modules
             logger.info("Reloading Asterisk PJSIP module")
