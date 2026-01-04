@@ -360,11 +360,15 @@ async function createUser(event) {
         return;
     }
 
+    // Get submit button (it's outside the form)
+    const submitBtn = document.querySelector('button[form="addUserForm"]');
+
     try {
         // Disable submit button
-        const submitBtn = event.target.querySelector('button[type="submit"]');
-        submitBtn.disabled = true;
-        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i> Creating...';
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i> Creating...';
+        }
 
         const result = await createUserAPI(name, email);
 
@@ -382,9 +386,10 @@ async function createUser(event) {
         errorDiv.classList.remove('d-none');
     } finally {
         // Re-enable submit button
-        const submitBtn = event.target.querySelector('button[type="submit"]');
-        submitBtn.disabled = false;
-        submitBtn.innerHTML = '<i class="fas fa-plus me-1"></i> Create User';
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = '<i class="fas fa-plus me-1"></i> Create User';
+        }
     }
 }
 
