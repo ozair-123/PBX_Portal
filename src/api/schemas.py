@@ -160,6 +160,40 @@ class ApplyErrorResponse(BaseModel):
     }
 
 
+class ApplyAuditLogResponse(BaseModel):
+    """Response body for a single apply audit log entry."""
+
+    id: str = Field(..., description="Audit log UUID")
+    triggered_at: str = Field(..., description="Timestamp when apply was triggered (ISO 8601)")
+    triggered_by: str = Field(..., description="Username or identifier who triggered the apply")
+    outcome: str = Field(..., description="Apply outcome: 'success' or 'failure'")
+    error_details: Optional[str] = Field(None, description="Error details if outcome was 'failure'")
+    files_written: Optional[List[str]] = Field(None, description="List of files written")
+    reload_results: Optional[dict] = Field(None, description="Asterisk reload command results")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "id": "9b7d8c6e-5f4a-3b2c-1d0e-9f8a7b6c5d4e",
+                    "triggered_at": "2024-01-15T10:30:00",
+                    "triggered_by": "admin@example.com",
+                    "outcome": "success",
+                    "error_details": None,
+                    "files_written": [
+                        "/etc/asterisk/pjsip.d/synergycall/generated_endpoints.conf",
+                        "/etc/asterisk/extensions.d/synergycall/generated_routing.conf"
+                    ],
+                    "reload_results": {
+                        "pjsip": {"success": True},
+                        "dialplan": {"success": True}
+                    }
+                }
+            ]
+        }
+    }
+
+
 # ============================================================================
 # User Story 3: List Users
 # ============================================================================

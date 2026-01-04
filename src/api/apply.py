@@ -10,6 +10,7 @@ from .schemas import (
     ApplyRequest,
     ApplyResponse,
     ApplyErrorResponse,
+    ApplyAuditLogResponse,
     ErrorResponse
 )
 
@@ -132,5 +133,63 @@ async def apply_configuration(
                 "error": "Internal server error",
                 "audit_log_id": None,
                 "details": "An unexpected error occurred during configuration apply"
+            }
+        )
+
+
+@router.get(
+    "/history",
+    response_model=list[ApplyAuditLogResponse],
+    status_code=status.HTTP_200_OK,
+    summary="Get apply configuration history",
+    description="Retrieve the history of apply operations from the audit log, ordered by most recent first."
+)
+async def get_apply_history(
+    limit: int = 10,
+    db: Session = Depends(get_db)
+) -> list[ApplyAuditLogResponse]:
+    """
+    Get apply configuration history.
+
+    - **limit**: Maximum number of history entries to return (default: 10, max: 100)
+
+    Returns a list of apply audit log entries ordered by most recent first.
+    """
+    from ..models.apply_audit_log import ApplyAuditLog
+
+    # Limit between 1 and 100
+    limit = max(1, min(limit, 100))
+
+    try:
+        # Query audit logs ordered by most recent first
+        audit_logs = (
+            db.query(ApplyAuditLog)
+            .order_by(ApplyAuditLog.triggered_at.desc())
+            .limit(limit)
+            .all()
+        )
+
+        # Convert to response format
+        result = []
+        for log in audit_logs:
+            result.append(ApplyAuditLogResponse(
+                id=str(log.id),
+                triggered_at=log.triggered_at.isoformat(),
+                triggered_by=log.triggered_by,
+                outcome=log.outcome,
+                error_details=log.error_details,
+                files_written=log.files_written,
+                reload_results=log.reload_results
+            ))
+
+        return result
+
+    except Exception as e:
+        logger.exception(f"Error retrieving apply history: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Failed to retrieve apply history",
+                "details": str(e)
             }
         )
