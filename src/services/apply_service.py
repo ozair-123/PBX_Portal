@@ -189,7 +189,7 @@ class ApplyService:
                     {"lock_id": ApplyService.APPLY_LOCK_ID}
                 )
                 lock_acquired = False
-                logger.info("Advisory lock released")
+                logger.warning("Advisory lock released in success path")
 
             result = {
                 "audit_log_id": str(audit_log.id),
@@ -244,7 +244,7 @@ class ApplyService:
                         text("SELECT pg_advisory_unlock(:lock_id)"),
                         {"lock_id": ApplyService.APPLY_LOCK_ID}
                     )
-                    logger.info("Advisory lock released in finally block")
+                    logger.warning("Advisory lock released in finally block")
                 except Exception as unlock_error:
                     logger.error(
                         f"CRITICAL: Failed to release advisory lock in finally block: {str(unlock_error)}. "
