@@ -107,7 +107,7 @@ class PJSIPGenerator:
         """
         return f"""[{extension_number}]
 type=endpoint
-context=synergy-internal
+context=default
 disallow=all
 allow=ulaw
 allow=alaw
