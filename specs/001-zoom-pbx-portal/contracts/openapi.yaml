@@ -1,0 +1,2033 @@
+openapi: 3.0.3
+info:
+  title: Zoom-Style PBX Management Portal API
+  description: |
+    REST API for managing Asterisk PBX configuration including users, devices, DIDs, trunks, outbound policies, and apply operations.
+
+    ## Authentication
+    All endpoints require JWT authentication via `Authorization: Bearer <token>` header.
+
+    ## Multi-Tenancy
+    All resources are scoped to tenants. Non-admin users can only access resources within their tenant.
+
+    ## Roles
+    - **platform_admin**: Full system access, manage all tenants
+    - **tenant_admin**: Manage users, devices, DIDs, policies within own tenant
+    - **support**: Read-only access to tenant resources for troubleshooting
+    - **end_user**: Self-service only (DND, call forwarding, voicemail)
+  version: 1.0.0
+  contact:
+    name: API Support
+    email: support@example.com
+
+servers:
+  - url: https://pbx.example.com/api/v1
+    description: Production server
+  - url: http://localhost:8000/api/v1
+    description: Development server
+
+tags:
+  - name: Authentication
+    description: Login, logout, token refresh
+  - name: Tenants
+    description: Tenant management (platform admin only)
+  - name: Users
+    description: User provisioning and management
+  - name: Devices
+    description: SIP device management
+  - name: DIDs
+    description: Inbound DID routing
+  - name: Trunks
+    description: SIP trunk configuration
+  - name: Outbound Policies
+    description: Outbound calling rules
+  - name: Apply
+    description: Configuration apply operations
+  - name: Self-Service
+    description: End user self-service features
+  - name: Diagnostics
+    description: Device status and health checks
+  - name: Audit
+    description: Audit log queries
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    # Authentication Schemas
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: admin@example.com
+        password:
+          type: string
+          format: password
+          example: SecurePassword123
+
+    LoginResponse:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in, user]
+      properties:
+        access_token:
+          type: string
+          description: JWT access token (1 hour expiry)
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        refresh_token:
+          type: string
+          description: JWT refresh token (7 day expiry)
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        token_type:
+          type: string
+          enum: [Bearer]
+          example: Bearer
+        expires_in:
+          type: integer
+          description: Access token expiry in seconds
+          example: 3600
+        user:
+          $ref: '#/components/schemas/User'
+
+    RefreshTokenRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+
+    # Tenant Schemas
+    Tenant:
+      type: object
+      required: [id, name, ext_min, ext_max, ext_next, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: 123e4567-e89b-12d3-a456-426614174000
+        name:
+          type: string
+          maxLength: 255
+          example: Acme Corporation
+        timezone:
+          type: string
+          description: IANA timezone identifier
+          default: UTC
+          example: America/New_York
+        ext_min:
+          type: integer
+          minimum: 1000
+          example: 1000
+        ext_max:
+          type: integer
+          maximum: 9999
+          example: 1999
+        ext_next:
+          type: integer
+          description: Next available extension
+          example: 1005
+        default_inbound_destination:
+          type: string
+          nullable: true
+          description: Default destination for unassigned DIDs
+          example: VOICEMAIL:general
+        outbound_policy_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Default outbound calling policy
+        status:
+          type: string
+          enum: [active, suspended]
+          example: active
+        created_at:
+          type: string
+          format: date-time
+          example: 2026-01-05T10:00:00Z
+        updated_at:
+          type: string
+          format: date-time
+          example: 2026-01-05T10:00:00Z
+
+    TenantCreate:
+      type: object
+      required: [name, ext_min, ext_max]
+      properties:
+        name:
+          type: string
+          maxLength: 255
+          example: Acme Corporation
+        timezone:
+          type: string
+          default: UTC
+          example: America/New_York
+        ext_min:
+          type: integer
+          minimum: 1000
+          example: 1000
+        ext_max:
+          type: integer
+          maximum: 9999
+          example: 1999
+        default_inbound_destination:
+          type: string
+          nullable: true
+          example: VOICEMAIL:general
+
+    TenantUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        timezone:
+          type: string
+        default_inbound_destination:
+          type: string
+          nullable: true
+        outbound_policy_id:
+          type: string
+          format: uuid
+          nullable: true
+        status:
+          type: string
+          enum: [active, suspended]
+
+    # User Schemas
+    User:
+      type: object
+      required: [id, tenant_id, username, email, full_name, role, status, extension]
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: 456e7890-e89b-12d3-a456-426614174001
+        tenant_id:
+          type: string
+          format: uuid
+          example: 123e4567-e89b-12d3-a456-426614174000
+        username:
+          type: string
+          maxLength: 255
+          example: jdoe
+        email:
+          type: string
+          format: email
+          example: john.doe@example.com
+        full_name:
+          type: string
+          maxLength: 255
+          example: John Doe
+        role:
+          type: string
+          enum: [platform_admin, tenant_admin, support, end_user]
+          example: tenant_admin
+        status:
+          type: string
+          enum: [active, suspended, deleted]
+          example: active
+        extension:
+          type: integer
+          example: 1001
+        outbound_callerid:
+          type: string
+          nullable: true
+          pattern: '^\+[1-9]\d{1,14}$'
+          example: +15551234567
+        voicemail_enabled:
+          type: boolean
+          default: true
+          example: true
+        dnd_enabled:
+          type: boolean
+          default: false
+          example: false
+        call_forward_destination:
+          type: string
+          nullable: true
+          example: 1002
+        created_at:
+          type: string
+          format: date-time
+          example: 2026-01-05T10:00:00Z
+        updated_at:
+          type: string
+          format: date-time
+          example: 2026-01-05T10:00:00Z
+
+    UserCreate:
+      type: object
+      required: [email, full_name, password, role]
+      properties:
+        email:
+          type: string
+          format: email
+          example: john.doe@example.com
+        full_name:
+          type: string
+          maxLength: 255
+          example: John Doe
+        password:
+          type: string
+          format: password
+          minLength: 8
+          example: SecurePassword123
+        role:
+          type: string
+          enum: [tenant_admin, support, end_user]
+          default: end_user
+          example: end_user
+        outbound_callerid:
+          type: string
+          nullable: true
+          pattern: '^\+[1-9]\d{1,14}$'
+        voicemail_enabled:
+          type: boolean
+          default: true
+
+    UserUpdate:
+      type: object
+      properties:
+        full_name:
+          type: string
+          maxLength: 255
+        role:
+          type: string
+          enum: [tenant_admin, support, end_user]
+        status:
+          type: string
+          enum: [active, suspended]
+        outbound_callerid:
+          type: string
+          nullable: true
+          pattern: '^\+[1-9]\d{1,14}$'
+        voicemail_enabled:
+          type: boolean
+
+    # Device Schemas
+    Device:
+      type: object
+      required: [id, user_id, tenant_id, label, sip_username, transport, enabled]
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: 789e0123-e89b-12d3-a456-426614174002
+        user_id:
+          type: string
+          format: uuid
+          example: 456e7890-e89b-12d3-a456-426614174001
+        tenant_id:
+          type: string
+          format: uuid
+          example: 123e4567-e89b-12d3-a456-426614174000
+        label:
+          type: string
+          maxLength: 255
+          example: Desk Phone
+        sip_username:
+          type: string
+          maxLength: 255
+          example: 1001-desk
+        sip_password:
+          type: string
+          description: Masked in responses, only returned on creation
+          example: '********'
+        transport:
+          type: string
+          enum: [udp, tcp, tls, wss]
+          default: udp
+          example: udp
+        nat_flags:
+          type: object
+          nullable: true
+          example: {force_rport: true, comedia: true}
+        codecs:
+          type: array
+          items:
+            type: string
+          default: [ulaw, alaw]
+          example: [ulaw, alaw, g722]
+        enabled:
+          type: boolean
+          default: true
+          example: true
+        created_at:
+          type: string
+          format: date-time
+          example: 2026-01-05T10:00:00Z
+        updated_at:
+          type: string
+          format: date-time
+          example: 2026-01-05T10:00:00Z
+
+    DeviceCreate:
+      type: object
+      required: [user_id, label]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+          example: 456e7890-e89b-12d3-a456-426614174001
+        label:
+          type: string
+          maxLength: 255
+          example: Desk Phone
+        transport:
+          type: string
+          enum: [udp, tcp, tls, wss]
+          default: udp
+        nat_flags:
+          type: object
+          nullable: true
+        codecs:
+          type: array
+          items:
+            type: string
+          default: [ulaw, alaw]
+
+    DeviceCreateResponse:
+      allOf:
+        - $ref: '#/components/schemas/Device'
+        - type: object
+          properties:
+            sip_password:
+              type: string
+              description: Plaintext password (only returned on creation)
+              example: RandomSecure123!
+
+    DeviceUpdate:
+      type: object
+      properties:
+        label:
+          type: string
+          maxLength: 255
+        transport:
+          type: string
+          enum: [udp, tcp, tls, wss]
+        nat_flags:
+          type: object
+          nullable: true
+        codecs:
+          type: array
+          items:
+            type: string
+        enabled:
+          type: boolean
+
+    DeviceStatus:
+      type: object
+      required: [device_id, sip_username, registered, contact_uri]
+      properties:
+        device_id:
+          type: string
+          format: uuid
+          example: 789e0123-e89b-12d3-a456-426614174002
+        sip_username:
+          type: string
+          example: 1001-desk
+        registered:
+          type: boolean
+          description: Is device currently registered?
+          example: true
+        contact_uri:
+          type: string
+          nullable: true
+          description: SIP contact URI (if registered)
+          example: sip:1001-desk@192.168.1.100:5060
+        user_agent:
+          type: string
+          nullable: true
+          example: Yealink T46S 66.83.0.50
+        expires:
+          type: integer
+          nullable: true
+          description: Registration expiry in seconds
+          example: 3600
+        last_registration:
+          type: string
+          format: date-time
+          nullable: true
+          example: 2026-01-05T10:00:00Z
+
+    # DID Schemas
+    DID:
+      type: object
+      required: [id, tenant_id, did_number, destination_type, destination_target, enabled]
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: 012e3456-e89b-12d3-a456-426614174003
+        tenant_id:
+          type: string
+          format: uuid
+          example: 123e4567-e89b-12d3-a456-426614174000
+        did_number:
+          type: string
+          pattern: '^\+[1-9]\d{1,14}$'
+          example: +15551234567
+        label:
+          type: string
+          nullable: true
+          maxLength: 255
+          example: Main Office Line
+        provider:
+          type: string
+          nullable: true
+          maxLength: 255
+          example: Twilio
+        destination_type:
+          type: string
+          enum: [USER, RING_GROUP, IVR, QUEUE, VOICEMAIL, EXTERNAL]
+          example: USER
+        destination_target:
+          type: string
+          description: User ID (UUID), extension, or external number depending on destination_type
+          example: 456e7890-e89b-12d3-a456-426614174001
+        enabled:
+          type: boolean
+          default: true
+          example: true
+        created_at:
+          type: string
+          format: date-time
+          example: 2026-01-05T10:00:00Z
+        updated_at:
+          type: string
+          format: date-time
+          example: 2026-01-05T10:00:00Z
+
+    DIDCreate:
+      type: object
+      required: [did_number, destination_type, destination_target]
+      properties:
+        did_number:
+          type: string
+          pattern: '^\+[1-9]\d{1,14}$'
+          example: +15551234567
+        label:
+          type: string
+          nullable: true
+          maxLength: 255
+        provider:
+          type: string
+          nullable: true
+          maxLength: 255
+        destination_type:
+          type: string
+          enum: [USER, RING_GROUP, IVR, QUEUE, VOICEMAIL, EXTERNAL]
+        destination_target:
+          type: string
+
+    DIDUpdate:
+      type: object
+      properties:
+        label:
+          type: string
+          nullable: true
+          maxLength: 255
+        provider:
+          type: string
+          nullable: true
+        destination_type:
+          type: string
+          enum: [USER, RING_GROUP, IVR, QUEUE, VOICEMAIL, EXTERNAL]
+        destination_target:
+          type: string
+        enabled:
+          type: boolean
+
+    # Trunk Schemas
+    Trunk:
+      type: object
+      required: [id, name, host, auth_mode, transport, enabled]
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: 345e6789-e89b-12d3-a456-426614174004
+        tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null for global trunks
+          example: 123e4567-e89b-12d3-a456-426614174000
+        name:
+          type: string
+          maxLength: 255
+          example: Twilio Main
+        host:
+          type: string
+          maxLength: 255
+          example: sip.twilio.com
+        auth_mode:
+          type: string
+          enum: [registration, ip_auth]
+          example: registration
+        registration_string:
+          type: string
+          nullable: true
+          description: Required if auth_mode=registration, masked in responses
+          example: '********'
+        transport:
+          type: string
+          enum: [udp, tcp, tls]
+          default: udp
+          example: udp
+        codecs:
+          type: array
+          items:
+            type: string
+          default: [ulaw, alaw]
+          example: [ulaw, alaw]
+        enabled:
+          type: boolean
+          default: true
+          example: true
+        created_at:
+          type: string
+          format: date-time
+          example: 2026-01-05T10:00:00Z
+        updated_at:
+          type: string
+          format: date-time
+          example: 2026-01-05T10:00:00Z
+
+    TrunkCreate:
+      type: object
+      required: [name, host, auth_mode, transport]
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        host:
+          type: string
+          maxLength: 255
+        auth_mode:
+          type: string
+          enum: [registration, ip_auth]
+        registration_string:
+          type: string
+          nullable: true
+          description: Required if auth_mode=registration
+        transport:
+          type: string
+          enum: [udp, tcp, tls]
+          default: udp
+        codecs:
+          type: array
+          items:
+            type: string
+          default: [ulaw, alaw]
+
+    TrunkUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        host:
+          type: string
+        auth_mode:
+          type: string
+          enum: [registration, ip_auth]
+        registration_string:
+          type: string
+          nullable: true
+        transport:
+          type: string
+          enum: [udp, tcp, tls]
+        codecs:
+          type: array
+          items:
+            type: string
+        enabled:
+          type: boolean
+
+    TrunkStatus:
+      type: object
+      required: [trunk_id, name, registered]
+      properties:
+        trunk_id:
+          type: string
+          format: uuid
+          example: 345e6789-e89b-12d3-a456-426614174004
+        name:
+          type: string
+          example: Twilio Main
+        registered:
+          type: boolean
+          description: Is trunk currently registered? (only for registration mode)
+          example: true
+        status:
+          type: string
+          enum: [registered, unregistered, unreachable]
+          example: registered
+        last_registration:
+          type: string
+          format: date-time
+          nullable: true
+          example: 2026-01-05T10:00:00Z
+
+    # Outbound Policy Schemas
+    OutboundPolicy:
+      type: object
+      required: [id, tenant_id, name, rules, enabled]
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: 678e9012-e89b-12d3-a456-426614174005
+        tenant_id:
+          type: string
+          format: uuid
+          example: 123e4567-e89b-12d3-a456-426614174000
+        name:
+          type: string
+          maxLength: 255
+          example: Local Only
+        rules:
+          type: object
+          description: Policy rules (patterns, transformations, trunk priority)
+          example:
+            rules:
+              - pattern: '^1[2-9]\d{9}$'
+                description: North American 11-digit numbers
+                transformations:
+                  - type: prepend
+                    value: '1'
+                trunk_priority:
+                  - 345e6789-e89b-12d3-a456-426614174004
+            default_action: block
+        enabled:
+          type: boolean
+          default: true
+          example: true
+        created_at:
+          type: string
+          format: date-time
+          example: 2026-01-05T10:00:00Z
+        updated_at:
+          type: string
+          format: date-time
+          example: 2026-01-05T10:00:00Z
+
+    OutboundPolicyCreate:
+      type: object
+      required: [name, rules]
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        rules:
+          type: object
+
+    OutboundPolicyUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        rules:
+          type: object
+        enabled:
+          type: boolean
+
+    # Apply Job Schemas
+    ApplyJob:
+      type: object
+      required: [id, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: 901e2345-e89b-12d3-a456-426614174006
+        tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+          example: 123e4567-e89b-12d3-a456-426614174000
+        actor_id:
+          type: string
+          format: uuid
+          example: 456e7890-e89b-12d3-a456-426614174001
+        status:
+          type: string
+          enum: [PENDING, RUNNING, SUCCESS, FAILED, ROLLED_BACK]
+          example: SUCCESS
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+          example: 2026-01-05T10:00:00Z
+        ended_at:
+          type: string
+          format: date-time
+          nullable: true
+          example: 2026-01-05T10:00:30Z
+        error_text:
+          type: string
+          nullable: true
+          example: null
+        diff_summary:
+          type: string
+          nullable: true
+          example: Added 3 users, updated 2 DIDs
+        config_files:
+          type: array
+          nullable: true
+          items:
+            type: string
+          example:
+            - /etc/asterisk/extensions.d/synergycall/generated_inbound.conf
+            - /etc/asterisk/extensions.d/synergycall/generated_internal.conf
+        created_at:
+          type: string
+          format: date-time
+          example: 2026-01-05T10:00:00Z
+
+    ApplyPreview:
+      type: object
+      required: [changes, conflicts]
+      properties:
+        changes:
+          type: object
+          description: Summary of pending changes
+          example:
+            users_added: 3
+            users_updated: 1
+            dids_added: 2
+            devices_added: 4
+        conflicts:
+          type: array
+          description: Validation errors or conflicts
+          items:
+            type: object
+            properties:
+              severity:
+                type: string
+                enum: [error, warning]
+              message:
+                type: string
+          example:
+            - severity: error
+              message: Duplicate extension 1001 detected
+            - severity: warning
+              message: DID +15551234567 routes to suspended user
+
+    # Self-Service Schemas
+    SelfServiceUpdate:
+      type: object
+      properties:
+        dnd_enabled:
+          type: boolean
+        call_forward_destination:
+          type: string
+          nullable: true
+
+    VoicemailPINUpdate:
+      type: object
+      required: [current_pin, new_pin]
+      properties:
+        current_pin:
+          type: string
+          pattern: '^\d{4,8}$'
+          example: '1234'
+        new_pin:
+          type: string
+          pattern: '^\d{4,8}$'
+          example: '5678'
+
+    VoicemailGreetingUpload:
+      type: object
+      required: [audio_file]
+      properties:
+        audio_file:
+          type: string
+          format: binary
+          description: MP3 or WAV file (max 5MB)
+
+    # Health Check Schema
+    HealthCheck:
+      type: object
+      required: [status, checks]
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+          example: healthy
+        checks:
+          type: object
+          properties:
+            database:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [ok, error]
+                  example: ok
+                latency_ms:
+                  type: number
+                  example: 5.2
+            mariadb:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [ok, error]
+                  example: ok
+                latency_ms:
+                  type: number
+                  example: 3.8
+            asterisk_ami:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [ok, error]
+                  example: ok
+                connected:
+                  type: boolean
+                  example: true
+            disk_space:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [ok, warning, error]
+                  example: ok
+                free_gb:
+                  type: number
+                  example: 45.7
+                percent_used:
+                  type: number
+                  example: 35.2
+
+    # Audit Log Schema
+    AuditLog:
+      type: object
+      required: [id, actor_id, action, entity_type, entity_id, timestamp]
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: 234e5678-e89b-12d3-a456-426614174007
+        tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+          example: 123e4567-e89b-12d3-a456-426614174000
+        actor_id:
+          type: string
+          format: uuid
+          example: 456e7890-e89b-12d3-a456-426614174001
+        action:
+          type: string
+          enum: [CREATE, UPDATE, DELETE, LOGIN, LOGOUT, APPLY]
+          example: CREATE
+        entity_type:
+          type: string
+          example: User
+        entity_id:
+          type: string
+          format: uuid
+          example: 456e7890-e89b-12d3-a456-426614174001
+        before:
+          type: object
+          nullable: true
+          description: Entity state before change (null for CREATE)
+        after:
+          type: object
+          nullable: true
+          description: Entity state after change (null for DELETE)
+        timestamp:
+          type: string
+          format: date-time
+          example: 2026-01-05T10:00:00Z
+        source_ip:
+          type: string
+          nullable: true
+          example: 192.168.1.100
+        user_agent:
+          type: string
+          nullable: true
+          example: Mozilla/5.0...
+
+    # Error Schemas
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          example: VALIDATION_ERROR
+        message:
+          type: string
+          example: Invalid input data
+        details:
+          type: object
+          nullable: true
+          example:
+            field: email
+            reason: Invalid email format
+
+    PaginatedResponse:
+      type: object
+      required: [items, total, page, page_size]
+      properties:
+        items:
+          type: array
+          items: {}
+        total:
+          type: integer
+          example: 150
+        page:
+          type: integer
+          example: 1
+        page_size:
+          type: integer
+          example: 50
+        has_next:
+          type: boolean
+          example: true
+
+paths:
+  # Authentication Endpoints
+  /auth/login:
+    post:
+      tags: [Authentication]
+      summary: User login
+      description: Authenticate user and return JWT tokens
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/refresh:
+    post:
+      tags: [Authentication]
+      summary: Refresh access token
+      description: Use refresh token to get new access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshTokenRequest'
+      responses:
+        '200':
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          description: Invalid refresh token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      summary: User logout
+      description: Invalidate current session (blacklist token)
+      responses:
+        '204':
+          description: Logout successful
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # Tenant Endpoints
+  /tenants:
+    get:
+      tags: [Tenants]
+      summary: List tenants
+      description: Get list of all tenants (platform admin only)
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, suspended]
+      responses:
+        '200':
+          description: Tenant list retrieved
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginatedResponse'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Tenant'
+        '403':
+          description: Forbidden (platform admin only)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    post:
+      tags: [Tenants]
+      summary: Create tenant
+      description: Create new tenant (platform admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantCreate'
+      responses:
+        '201':
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '400':
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden
+
+  /tenants/{tenant_id}:
+    get:
+      tags: [Tenants]
+      summary: Get tenant details
+      description: Retrieve tenant by ID
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Tenant retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '404':
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    patch:
+      tags: [Tenants]
+      summary: Update tenant
+      description: Update tenant (platform admin only)
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantUpdate'
+      responses:
+        '200':
+          description: Tenant updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '404':
+          description: Tenant not found
+        '403':
+          description: Forbidden
+
+  # User Endpoints
+  /users:
+    get:
+      tags: [Users]
+      summary: List users
+      description: Get list of users in current tenant
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, suspended, deleted]
+        - name: role
+          in: query
+          schema:
+            type: string
+            enum: [platform_admin, tenant_admin, support, end_user]
+      responses:
+        '200':
+          description: User list retrieved
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PaginatedResponse'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/User'
+
+    post:
+      tags: [Users]
+      summary: Create user
+      description: Create new user (auto-assigns extension)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCreate'
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: Invalid input (e.g., extension pool exhausted)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /users/{user_id}:
+    get:
+      tags: [Users]
+      summary: Get user details
+      description: Retrieve user by ID
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: User retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '404':
+          description: User not found
+
+    patch:
+      tags: [Users]
+      summary: Update user
+      description: Update user details (tenant admin only)
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdate'
+      responses:
+        '200':
+          description: User updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '404':
+          description: User not found
+
+    delete:
+      tags: [Users]
+      summary: Delete user
+      description: Soft-delete user (tenant admin only)
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: User deleted (soft delete)
+        '404':
+          description: User not found
+
+  # Device Endpoints
+  /devices:
+    get:
+      tags: [Devices]
+      summary: List devices
+      description: Get list of devices (optionally filtered by user_id)
+      parameters:
+        - name: user_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: enabled
+          in: query
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Device list retrieved
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Device'
+
+    post:
+      tags: [Devices]
+      summary: Create device
+      description: Create new device for user (auto-generates SIP password)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceCreate'
+      responses:
+        '201':
+          description: Device created (SIP password returned ONCE)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceCreateResponse'
+        '400':
+          description: Invalid input
+
+  /devices/{device_id}:
+    get:
+      tags: [Devices]
+      summary: Get device details
+      description: Retrieve device by ID
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Device retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+        '404':
+          description: Device not found
+
+    patch:
+      tags: [Devices]
+      summary: Update device
+      description: Update device configuration
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceUpdate'
+      responses:
+        '200':
+          description: Device updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+        '404':
+          description: Device not found
+
+    delete:
+      tags: [Devices]
+      summary: Delete device
+      description: Hard-delete device
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Device deleted
+        '404':
+          description: Device not found
+
+  /devices/{device_id}/status:
+    get:
+      tags: [Diagnostics]
+      summary: Get device registration status
+      description: Query Asterisk AMI for real-time device status
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Device status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceStatus'
+        '404':
+          description: Device not found
+
+  # DID Endpoints
+  /dids:
+    get:
+      tags: [DIDs]
+      summary: List DIDs
+      description: Get list of DIDs in current tenant
+      parameters:
+        - name: enabled
+          in: query
+          schema:
+            type: boolean
+        - name: destination_type
+          in: query
+          schema:
+            type: string
+            enum: [USER, RING_GROUP, IVR, QUEUE, VOICEMAIL, EXTERNAL]
+      responses:
+        '200':
+          description: DID list retrieved
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DID'
+
+    post:
+      tags: [DIDs]
+      summary: Create DID
+      description: Create new DID routing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DIDCreate'
+      responses:
+        '201':
+          description: DID created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DID'
+        '400':
+          description: Invalid input (e.g., duplicate DID number)
+
+  /dids/{did_id}:
+    get:
+      tags: [DIDs]
+      summary: Get DID details
+      description: Retrieve DID by ID
+      parameters:
+        - name: did_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: DID retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DID'
+        '404':
+          description: DID not found
+
+    patch:
+      tags: [DIDs]
+      summary: Update DID
+      description: Update DID routing
+      parameters:
+        - name: did_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DIDUpdate'
+      responses:
+        '200':
+          description: DID updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DID'
+        '404':
+          description: DID not found
+
+    delete:
+      tags: [DIDs]
+      summary: Delete DID
+      description: Remove DID routing
+      parameters:
+        - name: did_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: DID deleted
+        '404':
+          description: DID not found
+
+  # Trunk Endpoints
+  /trunks:
+    get:
+      tags: [Trunks]
+      summary: List trunks
+      description: Get list of trunks (tenant-specific + global)
+      parameters:
+        - name: enabled
+          in: query
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Trunk list retrieved
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Trunk'
+
+    post:
+      tags: [Trunks]
+      summary: Create trunk
+      description: Create new SIP trunk (tenant admin for tenant-specific, platform admin for global)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TrunkCreate'
+      responses:
+        '201':
+          description: Trunk created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trunk'
+        '400':
+          description: Invalid input
+
+  /trunks/{trunk_id}:
+    get:
+      tags: [Trunks]
+      summary: Get trunk details
+      description: Retrieve trunk by ID
+      parameters:
+        - name: trunk_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Trunk retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trunk'
+        '404':
+          description: Trunk not found
+
+    patch:
+      tags: [Trunks]
+      summary: Update trunk
+      description: Update trunk configuration
+      parameters:
+        - name: trunk_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TrunkUpdate'
+      responses:
+        '200':
+          description: Trunk updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trunk'
+        '404':
+          description: Trunk not found
+
+    delete:
+      tags: [Trunks]
+      summary: Delete trunk
+      description: Remove trunk
+      parameters:
+        - name: trunk_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Trunk deleted
+        '404':
+          description: Trunk not found
+
+  /trunks/{trunk_id}/status:
+    get:
+      tags: [Diagnostics]
+      summary: Get trunk registration status
+      description: Query Asterisk AMI for trunk status
+      parameters:
+        - name: trunk_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Trunk status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrunkStatus'
+        '404':
+          description: Trunk not found
+
+  # Outbound Policy Endpoints
+  /outbound-policies:
+    get:
+      tags: [Outbound Policies]
+      summary: List outbound policies
+      description: Get list of outbound policies in current tenant
+      parameters:
+        - name: enabled
+          in: query
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Policy list retrieved
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OutboundPolicy'
+
+    post:
+      tags: [Outbound Policies]
+      summary: Create outbound policy
+      description: Create new outbound calling policy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OutboundPolicyCreate'
+      responses:
+        '201':
+          description: Policy created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutboundPolicy'
+        '400':
+          description: Invalid input (e.g., invalid regex pattern, trunk not found)
+
+  /outbound-policies/{policy_id}:
+    get:
+      tags: [Outbound Policies]
+      summary: Get policy details
+      description: Retrieve policy by ID
+      parameters:
+        - name: policy_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Policy retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutboundPolicy'
+        '404':
+          description: Policy not found
+
+    patch:
+      tags: [Outbound Policies]
+      summary: Update policy
+      description: Update policy rules
+      parameters:
+        - name: policy_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OutboundPolicyUpdate'
+      responses:
+        '200':
+          description: Policy updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutboundPolicy'
+        '404':
+          description: Policy not found
+
+    delete:
+      tags: [Outbound Policies]
+      summary: Delete policy
+      description: Remove outbound policy
+      parameters:
+        - name: policy_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Policy deleted
+        '404':
+          description: Policy not found
+
+  # Apply Endpoints
+  /apply/preview:
+    post:
+      tags: [Apply]
+      summary: Preview pending changes
+      description: Validate and preview changes before applying
+      responses:
+        '200':
+          description: Preview generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplyPreview'
+
+  /apply:
+    post:
+      tags: [Apply]
+      summary: Apply configuration
+      description: Generate configs, reload Asterisk (automatic rollback on failure)
+      responses:
+        '202':
+          description: Apply started (async operation)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplyJob'
+        '400':
+          description: Validation errors prevent apply
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Another apply operation is already running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /apply/jobs:
+    get:
+      tags: [Apply]
+      summary: List apply jobs
+      description: Get apply job history for current tenant
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, RUNNING, SUCCESS, FAILED, ROLLED_BACK]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: Apply job list retrieved
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApplyJob'
+
+  /apply/jobs/{job_id}:
+    get:
+      tags: [Apply]
+      summary: Get apply job details
+      description: Retrieve apply job by ID
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Apply job retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplyJob'
+        '404':
+          description: Apply job not found
+
+  # Self-Service Endpoints
+  /self-service/me:
+    get:
+      tags: [Self-Service]
+      summary: Get current user profile
+      description: Retrieve logged-in user's profile
+      responses:
+        '200':
+          description: User profile retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+
+    patch:
+      tags: [Self-Service]
+      summary: Update self-service settings
+      description: Update DND, call forwarding (end users only, immediate effect)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SelfServiceUpdate'
+      responses:
+        '200':
+          description: Settings updated (takes effect immediately)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+
+  /self-service/voicemail/pin:
+    put:
+      tags: [Self-Service]
+      summary: Change voicemail PIN
+      description: Update voicemail PIN (requires current PIN verification)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoicemailPINUpdate'
+      responses:
+        '204':
+          description: PIN updated
+        '401':
+          description: Current PIN incorrect
+
+  /self-service/voicemail/greeting:
+    post:
+      tags: [Self-Service]
+      summary: Upload voicemail greeting
+      description: Upload custom voicemail greeting (MP3/WAV, max 5MB)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/VoicemailGreetingUpload'
+      responses:
+        '204':
+          description: Greeting uploaded
+        '400':
+          description: Invalid file format or size
+
+  # Diagnostics Endpoints
+  /health:
+    get:
+      tags: [Diagnostics]
+      summary: System health check
+      description: Check database, AMI, Asterisk, disk space
+      security: []
+      responses:
+        '200':
+          description: System healthy or degraded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheck'
+        '503':
+          description: System unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheck'
+
+  # Audit Endpoints
+  /audit-logs:
+    get:
+      tags: [Audit]
+      summary: Query audit logs
+      description: Get audit trail for current tenant (tenant admin or support only)
+      parameters:
+        - name: entity_type
+          in: query
+          schema:
+            type: string
+        - name: entity_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: action
+          in: query
+          schema:
+            type: string
+            enum: [CREATE, UPDATE, DELETE, LOGIN, LOGOUT, APPLY]
+        - name: actor_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+      responses:
+        '200':
+          description: Audit logs retrieved
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditLog'
+        '403':
+          description: Forbidden (tenant admin or support only)
