@@ -1,14 +1,12 @@
-"""Extension allocation service with concurrency-safe retry logic."""
+"""Extension allocation service with tenant-based allocation and row-level locking."""
 
 import secrets
 import logging
-from typing import Optional
+from uuid import UUID
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import text
 
-from ..models.extension import Extension
-from ..config import Config
+from ..models.tenant import Tenant
 
 logger = logging.getLogger(__name__)
 
@@ -26,101 +24,65 @@ def generate_sip_secret(length: int = 16) -> str:
     return secrets.token_urlsafe(length)
 
 
-def allocate_extension(session: Session, user_id: str, max_retries: int = 5) -> Extension:
+def allocate_extension_for_tenant(session: Session, tenant_id: UUID) -> int:
     """
-    Allocate the next available extension number for a user with concurrency-safe retry logic.
+    Allocate the next available extension for a tenant with row-level locking.
 
     This function implements race-condition safe allocation by:
-    1. Finding the minimum available extension number in the configured range
-    2. Attempting to insert with UNIQUE constraint enforcement
-    3. Retrying on conflict (IntegrityError) up to max_retries times
+    1. Acquiring row-level lock on tenant record (SELECT FOR UPDATE)
+    2. Using tenant.ext_next pointer for O(1) allocation
+    3. Incrementing ext_next atomically within the locked transaction
+    4. Validating extension pool availability
 
     Args:
         session: SQLAlchemy database session
-        user_id: UUID of the user to allocate extension for
-        max_retries: Maximum retry attempts on conflict (default: 5)
+        tenant_id: UUID of the tenant to allocate extension for
 
     Returns:
-        Extension: The successfully allocated Extension object
+        int: The allocated extension number
 
     Raises:
-        ValueError: If extension pool is exhausted (all 1000 extensions allocated)
-        RuntimeError: If max retries exceeded due to high contention
+        ValueError: If extension pool is exhausted for this tenant
+        RuntimeError: If tenant not found
+
+    Example:
+        >>> tenant = session.query(Tenant).filter_by(id=tenant_id).first()
+        >>> extension = allocate_extension_for_tenant(session, tenant.id)
+        >>> user.extension = extension
+        >>> session.commit()
     """
-    extension_range_start = Config.EXTENSION_MIN
-    extension_range_end = Config.EXTENSION_MAX
+    # Acquire row-level lock on tenant to prevent concurrent allocation conflicts
+    # FOR UPDATE ensures exclusive access to this tenant row until transaction commits
+    tenant = (
+        session.query(Tenant)
+        .filter(Tenant.id == tenant_id)
+        .with_for_update()  # PostgreSQL row-level lock
+        .first()
+    )
 
-    for attempt in range(max_retries):
-        # Find the minimum available extension number
-        # This query finds the smallest number in range that's not yet allocated
-        query = text("""
-            SELECT COALESCE(
-                (
-                    SELECT MIN(candidate.number)
-                    FROM generate_series(:start, :end) AS candidate(number)
-                    LEFT JOIN extensions ON extensions.number = candidate.number
-                    WHERE extensions.number IS NULL
-                ),
-                NULL
-            ) AS available_extension
-        """)
+    if not tenant:
+        logger.error(f"Tenant {tenant_id} not found during extension allocation")
+        raise RuntimeError(f"Tenant {tenant_id} not found")
 
-        result = session.execute(
-            query,
-            {"start": extension_range_start, "end": extension_range_end}
+    # Check if extensions are available in the tenant's pool
+    if not tenant.has_available_extensions():
+        logger.error(
+            f"Extension pool exhausted for tenant {tenant.name} (ID: {tenant_id}): "
+            f"range {tenant.ext_min}-{tenant.ext_max} is full"
         )
-        available_number = result.scalar()
+        raise ValueError(
+            f"Extension pool exhausted for tenant '{tenant.name}'. "
+            f"All extensions in range {tenant.ext_min}-{tenant.ext_max} are allocated."
+        )
 
-        if available_number is None:
-            logger.error(
-                f"Extension pool exhausted: all extensions in range "
-                f"{extension_range_start}-{extension_range_end} are allocated"
-            )
-            raise ValueError(
-                f"Extension pool exhausted: no available extensions in range "
-                f"{extension_range_start}-{extension_range_end}"
-            )
+    # Allocate next extension and increment pointer atomically
+    extension_number = tenant.get_next_extension()
 
-        # Generate SIP secret for this extension
-        secret = generate_sip_secret()
+    logger.info(
+        f"Successfully allocated extension {extension_number} for tenant {tenant.name} "
+        f"(ID: {tenant_id}). Next available: {tenant.ext_next}"
+    )
 
-        # Attempt to create the extension with UNIQUE constraint enforcement
-        try:
-            extension = Extension(
-                number=available_number,
-                user_id=user_id,
-                secret=secret
-            )
-            session.add(extension)
-            session.flush()  # Flush to DB to trigger UNIQUE constraint check
-
-            logger.info(
-                f"Successfully allocated extension {available_number} for user {user_id} "
-                f"(attempt {attempt + 1}/{max_retries})"
-            )
-            return extension
-
-        except IntegrityError as e:
-            # Another transaction allocated this extension concurrently
-            session.rollback()
-            logger.warning(
-                f"Extension {available_number} conflict on attempt {attempt + 1}/{max_retries} "
-                f"for user {user_id}: {str(e)}"
-            )
-
-            if attempt == max_retries - 1:
-                # Last retry failed
-                logger.error(
-                    f"Max retries ({max_retries}) exceeded for extension allocation "
-                    f"for user {user_id}. High contention detected."
-                )
-                raise RuntimeError(
-                    f"Failed to allocate extension after {max_retries} attempts due to high "
-                    f"contention. Please try again."
-                )
-
-            # Continue to next retry
-            continue
-
-    # Should never reach here due to the raise in the loop
-    raise RuntimeError("Extension allocation failed unexpectedly")
+    # Note: Caller must commit the transaction to persist the allocation
+    # and release the row lock
+    return extension_number

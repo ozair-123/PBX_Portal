@@ -1,228 +1,317 @@
-"""User service for managing user and extension lifecycle."""
+"""User service for business logic and operations."""
 
 import logging
-from typing import Optional, List, Dict, Any
 from uuid import UUID
+from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError
-from pydantic import EmailStr
+from sqlalchemy import func
 
-from ..models.user import User
-from ..models.extension import Extension
-from ..config import Config
-from .extension_allocator import allocate_extension
+from ..models.user import User, UserRole, UserStatus
+from ..models.tenant import Tenant
+from ..auth.password import PasswordHasher, PINHasher
+from ..services.extension_allocator import allocate_extension_for_tenant
+from ..services.audit_service import AuditService
 
 logger = logging.getLogger(__name__)
 
 
 class UserService:
-    """Service for managing users and their extensions."""
+    """
+    Service for user provisioning and management.
+
+    Handles:
+    - User creation with automatic extension assignment
+    - User updates with audit logging
+    - User deletion (soft delete)
+    - User search and filtering
+    """
 
     @staticmethod
-    def create_user(session: Session, name: str, email: str) -> Dict[str, Any]:
+    def create_user(
+        session: Session,
+        tenant_id: UUID,
+        name: str,
+        email: str,
+        password: str,
+        role: str = "end_user",
+        actor_id: Optional[UUID] = None,
+        source_ip: Optional[str] = None,
+        user_agent: Optional[str] = None,
+        **kwargs
+    ) -> User:
         """
-        Create a new user with an automatically allocated extension.
-
-        This method:
-        1. Validates input (name, email)
-        2. Starts a database transaction
-        3. Creates the User record
-        4. Calls ExtensionAllocator to allocate an extension
-        5. Commits the transaction
-        6. Returns the user with extension details
+        Create a new user with automatic extension assignment.
 
         Args:
-            session: SQLAlchemy database session
-            name: User's full name
-            email: User's email address (must be unique)
+            session: Database session
+            tenant_id: Tenant ID
+            name: Full name
+            email: Email address (must be unique)
+            password: Plain text password (will be hashed)
+            role: User role (default: end_user)
+            actor_id: ID of user performing the action (for audit)
+            source_ip: Source IP address
+            user_agent: User agent string
+            **kwargs: Additional user fields (outbound_callerid, voicemail_enabled, etc.)
 
         Returns:
-            Dict containing user and extension details:
-            {
-                "id": UUID,
-                "tenant_id": UUID,
-                "name": str,
-                "email": str,
-                "created_at": datetime,
-                "extension": {
-                    "id": UUID,
-                    "number": int,
-                    "secret": str,
-                    "created_at": datetime
-                }
-            }
+            User: Created user object
 
         Raises:
-            ValueError: If email is already in use or validation fails
-            RuntimeError: If extension allocation fails after retries
+            ValueError: If email already exists or tenant not found
+            RuntimeError: If extension allocation fails
         """
-        # Input validation
-        if not name or not name.strip():
-            raise ValueError("Name cannot be empty")
+        # Check if email already exists
+        existing_user = session.query(User).filter(User.email == email).first()
+        if existing_user:
+            raise ValueError(f"Email {email} already exists")
 
-        if not email or not email.strip():
-            raise ValueError("Email cannot be empty")
+        # Verify tenant exists
+        tenant = session.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if not tenant:
+            raise ValueError(f"Tenant {tenant_id} not found")
 
-        email = email.strip().lower()
-
-        logger.info(f"Creating user with name='{name}', email='{email}'")
-
+        # Allocate extension for the user
         try:
-            # Create user record
-            user = User(
-                tenant_id=Config.DEFAULT_TENANT_ID,
-                name=name.strip(),
-                email=email
-            )
-            session.add(user)
-            session.flush()  # Flush to get user.id for extension allocation
-
-            logger.info(f"User created with id={user.id}")
-
-            # Allocate extension for this user
-            extension = allocate_extension(session, str(user.id))
-
-            # Commit transaction
-            session.commit()
-
-            logger.info(
-                f"User {user.id} created successfully with extension {extension.number}"
-            )
-
-            # Return user with extension details
-            return {
-                "id": str(user.id),
-                "tenant_id": str(user.tenant_id),
-                "name": user.name,
-                "email": user.email,
-                "created_at": user.created_at.isoformat(),
-                "extension": {
-                    "id": str(extension.id),
-                    "number": extension.number,
-                    "secret": extension.secret,
-                    "created_at": extension.created_at.isoformat()
-                }
-            }
-
-        except IntegrityError as e:
-            session.rollback()
-            # Check if email uniqueness constraint was violated
-            if "email" in str(e.orig).lower() or "unique" in str(e.orig).lower():
-                logger.warning(f"Email already exists: {email}")
-                raise ValueError(f"Email '{email}' is already in use")
-            else:
-                logger.error(f"Database integrity error creating user: {str(e)}")
-                raise ValueError(f"Failed to create user due to data conflict: {str(e)}")
-
+            extension_number = allocate_extension_for_tenant(session, tenant_id)
         except Exception as e:
-            session.rollback()
-            logger.error(f"Error creating user: {str(e)}")
-            raise
+            logger.error(f"Failed to allocate extension: {str(e)}")
+            raise RuntimeError(f"Extension allocation failed: {str(e)}")
+
+        # Hash password
+        password_hash = PasswordHasher.hash(password)
+
+        # Hash voicemail PIN if provided
+        voicemail_pin = kwargs.pop('voicemail_pin', None)
+        voicemail_pin_hash = None
+        if voicemail_pin:
+            voicemail_pin_hash = PINHasher.hash(voicemail_pin)
+
+        # Create user
+        user = User(
+            tenant_id=tenant_id,
+            name=name,
+            email=email,
+            password_hash=password_hash,
+            role=UserRole[role],
+            extension=extension_number,
+            voicemail_pin_hash=voicemail_pin_hash,
+            **kwargs
+        )
+
+        session.add(user)
+        session.flush()  # Get user ID before audit log
+
+        # Create audit log
+        if actor_id:
+            after_state = AuditService.entity_to_dict(
+                user,
+                exclude_fields=['password_hash', 'voicemail_pin_hash']
+            )
+            AuditService.log_create(
+                session=session,
+                actor_id=actor_id,
+                entity_type="User",
+                entity_id=user.id,
+                after_state=after_state,
+                tenant_id=tenant_id,
+                source_ip=source_ip,
+                user_agent=user_agent,
+            )
+
+        logger.info(f"Created user {email} with extension {extension_number}")
+        return user
 
     @staticmethod
-    def list_all_users(session: Session) -> List[Dict[str, Any]]:
+    def update_user(
+        session: Session,
+        user_id: UUID,
+        actor_id: Optional[UUID] = None,
+        source_ip: Optional[str] = None,
+        user_agent: Optional[str] = None,
+        **updates
+    ) -> User:
         """
-        Retrieve all users with their assigned extensions.
+        Update an existing user.
 
         Args:
-            session: SQLAlchemy database session
+            session: Database session
+            user_id: User ID to update
+            actor_id: ID of user performing the action
+            source_ip: Source IP address
+            user_agent: User agent string
+            **updates: Fields to update (name, email, password, role, etc.)
 
         Returns:
-            List of user dictionaries with extension details
+            User: Updated user object
 
         Raises:
-            RuntimeError: If database query fails
+            ValueError: If user not found or email already exists
         """
-        try:
-            # Query all users with their extensions (joined)
-            users = session.query(User).all()
+        user = session.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise ValueError(f"User {user_id} not found")
 
-            result = []
-            for user in users:
-                user_dict = {
-                    "id": str(user.id),
-                    "tenant_id": str(user.tenant_id),
-                    "name": user.name,
-                    "email": user.email,
-                    "created_at": user.created_at.isoformat(),
-                    "extension": None
-                }
+        # Capture before state for audit
+        before_state = AuditService.entity_to_dict(
+            user,
+            exclude_fields=['password_hash', 'voicemail_pin_hash']
+        ) if actor_id else None
 
-                # Add extension if it exists (should always exist in normal flow)
-                if user.extension:
-                    user_dict["extension"] = {
-                        "id": str(user.extension.id),
-                        "number": user.extension.number,
-                        "secret": user.extension.secret,
-                        "created_at": user.extension.created_at.isoformat()
-                    }
+        # Check email uniqueness if updating
+        if 'email' in updates:
+            existing = session.query(User).filter(
+                User.email == updates['email'],
+                User.id != user_id
+            ).first()
+            if existing:
+                raise ValueError(f"Email {updates['email']} already exists")
 
-                result.append(user_dict)
+        # Hash password if updating
+        if 'password' in updates:
+            updates['password_hash'] = PasswordHasher.hash(updates.pop('password'))
 
-            logger.info(f"Retrieved {len(result)} users")
-            return result
+        # Hash voicemail PIN if updating
+        if 'voicemail_pin' in updates:
+            pin = updates.pop('voicemail_pin')
+            updates['voicemail_pin_hash'] = PINHasher.hash(pin) if pin else None
 
-        except Exception as e:
-            logger.error(f"Error listing users: {str(e)}")
-            raise RuntimeError(f"Failed to retrieve users: {str(e)}")
+        # Convert role/status strings to enums
+        if 'role' in updates:
+            updates['role'] = UserRole[updates['role']]
+        if 'status' in updates:
+            updates['status'] = UserStatus[updates['status']]
+
+        # Update fields
+        for field, value in updates.items():
+            if hasattr(user, field):
+                setattr(user, field, value)
+
+        session.flush()
+
+        # Create audit log
+        if actor_id:
+            after_state = AuditService.entity_to_dict(
+                user,
+                exclude_fields=['password_hash', 'voicemail_pin_hash']
+            )
+            AuditService.log_update(
+                session=session,
+                actor_id=actor_id,
+                entity_type="User",
+                entity_id=user.id,
+                before_state=before_state,
+                after_state=after_state,
+                tenant_id=user.tenant_id,
+                source_ip=source_ip,
+                user_agent=user_agent,
+            )
+
+        logger.info(f"Updated user {user.email}")
+        return user
 
     @staticmethod
-    def delete_user(session: Session, user_id: str) -> Dict[str, Any]:
+    def delete_user(
+        session: Session,
+        user_id: UUID,
+        actor_id: Optional[UUID] = None,
+        source_ip: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> User:
         """
-        Delete a user and free their extension for reuse.
-
-        The extension is automatically deleted via CASCADE relationship.
+        Soft delete a user (set status to deleted).
 
         Args:
-            session: SQLAlchemy database session
-            user_id: UUID of the user to delete
+            session: Database session
+            user_id: User ID to delete
+            actor_id: ID of user performing the action
+            source_ip: Source IP address
+            user_agent: User agent string
 
         Returns:
-            Dict containing deletion details:
-            {
-                "message": str,
-                "deleted_user_id": str,
-                "freed_extension": int
-            }
+            User: Deleted user object
 
         Raises:
             ValueError: If user not found
-            RuntimeError: If deletion fails
         """
-        try:
-            # Find user by ID
-            user = session.query(User).filter(User.id == user_id).first()
+        user = session.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise ValueError(f"User {user_id} not found")
 
-            if not user:
-                logger.warning(f"User not found: {user_id}")
-                raise ValueError(f"User with id '{user_id}' not found")
+        # Capture before state
+        before_state = AuditService.entity_to_dict(
+            user,
+            exclude_fields=['password_hash', 'voicemail_pin_hash']
+        ) if actor_id else None
 
-            # Get extension number before deletion (for response)
-            freed_extension = user.extension.number if user.extension else None
+        # Soft delete
+        user.status = UserStatus.deleted
+        session.flush()
 
-            logger.info(
-                f"Deleting user {user_id} (email={user.email}, extension={freed_extension})"
+        # Create audit log
+        if actor_id:
+            AuditService.log_delete(
+                session=session,
+                actor_id=actor_id,
+                entity_type="User",
+                entity_id=user.id,
+                before_state=before_state,
+                tenant_id=user.tenant_id,
+                source_ip=source_ip,
+                user_agent=user_agent,
             )
 
-            # Delete user (cascade deletes extension)
-            session.delete(user)
-            session.commit()
+        logger.info(f"Deleted user {user.email}")
+        return user
 
-            logger.info(
-                f"User {user_id} deleted successfully, extension {freed_extension} freed"
-            )
+    @staticmethod
+    def get_user(session: Session, user_id: UUID) -> Optional[User]:
+        """Get user by ID."""
+        return session.query(User).filter(User.id == user_id).first()
 
-            return {
-                "message": "User deleted successfully",
-                "deleted_user_id": user_id,
-                "freed_extension": freed_extension
-            }
+    @staticmethod
+    def list_users(
+        session: Session,
+        tenant_id: Optional[UUID] = None,
+        status: Optional[str] = None,
+        role: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        List users with optional filtering and pagination.
 
-        except ValueError:
-            # Re-raise ValueError (user not found)
-            raise
+        Args:
+            session: Database session
+            tenant_id: Filter by tenant ID
+            status: Filter by status (active, suspended, deleted)
+            role: Filter by role
+            page: Page number (1-indexed)
+            page_size: Items per page
 
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Error deleting user {user_id}: {str(e)}")
-            raise RuntimeError(f"Failed to delete user: {str(e)}")
+        Returns:
+            dict: {users: List[User], total: int, page: int, page_size: int}
+        """
+        query = session.query(User)
+
+        # Apply filters
+        if tenant_id:
+            query = query.filter(User.tenant_id == tenant_id)
+        if status:
+            query = query.filter(User.status == UserStatus[status])
+        if role:
+            query = query.filter(User.role == UserRole[role])
+
+        # Get total count
+        total = query.count()
+
+        # Apply pagination
+        offset = (page - 1) * page_size
+        users = query.order_by(User.created_at.desc()).offset(offset).limit(page_size).all()
+
+        return {
+            "users": users,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }

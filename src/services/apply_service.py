@@ -1,19 +1,19 @@
 """Apply service for synchronizing database state to Asterisk configuration."""
 
 import logging
-from typing import Dict, Any
-from uuid import uuid4
+import os
+import shutil
+from pathlib import Path
+from typing import Dict, Any, List, Optional
+from uuid import uuid4, UUID
 from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from ..models.user import User
-from ..models.apply_audit_log import ApplyAuditLog
+from ..models.tenant import Tenant
+from ..models.apply_audit_log import ApplyJob, ApplyStatus
 from ..config import Config
-from ..config_generator.dialplan_generator import DialplanGenerator
-from ..config_generator.atomic_writer import AtomicFileWriter
-from ..asterisk.reloader import AsteriskReloader
-from .pjsip_realtime_service import PJSIPRealtimeService
 
 logger = logging.getLogger(__name__)
 
@@ -24,17 +24,175 @@ class ApplyService:
 
     This service orchestrates the complete apply workflow:
     1. Acquire PostgreSQL advisory lock (serialization)
-    2. Read all users and extensions from PostgreSQL database
-    3. Sync PJSIP endpoints to MariaDB realtime tables
-    4. Generate and write dialplan configuration file
-    5. Reload Asterisk PJSIP and dialplan modules
-    6. Create audit log entry in PostgreSQL
-    7. Release advisory lock
+    2. Validate configuration (check for conflicts, invalid data)
+    3. Backup current configuration files
+    4. Read all users and extensions from PostgreSQL database
+    5. Generate new configuration files
+    6. Write configuration files atomically
+    7. Reload Asterisk modules
+    8. Create audit log entry in PostgreSQL
+    9. Rollback on failure (restore from backup)
+    10. Release advisory lock
     """
 
     # PostgreSQL advisory lock ID for apply operations
     # Using a fixed integer to ensure all apply operations use the same lock
     APPLY_LOCK_ID = 123456789
+
+    # Backup directory for configuration rollback
+    BACKUP_DIR = Path("/var/backups/pbx_portal/config") if os.path.exists("/var") else Path("./backups/config")
+
+    @staticmethod
+    def validate_configuration(session: Session) -> Dict[str, Any]:
+        """
+        Validate configuration before applying.
+
+        Checks:
+        - Extension uniqueness within each tenant
+        - No duplicate emails
+        - All users have assigned extensions
+        - Tenant extension ranges are valid
+
+        Args:
+            session: Database session
+
+        Returns:
+            dict: Validation result with keys:
+                - valid: bool
+                - errors: List[str] (validation errors)
+                - warnings: List[str] (non-critical issues)
+        """
+        errors: List[str] = []
+        warnings: List[str] = []
+
+        # Check for duplicate emails
+        from sqlalchemy import func
+        duplicate_emails = (
+            session.query(User.email, func.count(User.id))
+            .group_by(User.email)
+            .having(func.count(User.id) > 1)
+            .all()
+        )
+        if duplicate_emails:
+            for email, count in duplicate_emails:
+                errors.append(f"Duplicate email found: {email} ({count} users)")
+
+        # Check extension uniqueness per tenant
+        tenants = session.query(Tenant).all()
+        for tenant in tenants:
+            tenant_users = session.query(User).filter(User.tenant_id == tenant.id).all()
+
+            # Check for duplicate extensions within tenant
+            extension_counts: Dict[int, int] = {}
+            for user in tenant_users:
+                if user.extension:
+                    extension_counts[user.extension] = extension_counts.get(user.extension, 0) + 1
+
+            for ext, count in extension_counts.items():
+                if count > 1:
+                    errors.append(
+                        f"Duplicate extension {ext} in tenant {tenant.name} ({count} users)"
+                    )
+
+            # Check for users without extensions
+            users_without_extensions = [u for u in tenant_users if not u.extension]
+            if users_without_extensions:
+                for user in users_without_extensions:
+                    errors.append(f"User {user.email} has no extension assigned")
+
+            # Validate tenant extension range
+            if tenant.ext_min >= tenant.ext_max:
+                errors.append(
+                    f"Invalid extension range for tenant {tenant.name}: "
+                    f"{tenant.ext_min}-{tenant.ext_max}"
+                )
+
+            if tenant.ext_next > tenant.ext_max + 1:
+                warnings.append(
+                    f"Tenant {tenant.name} ext_next ({tenant.ext_next}) exceeds range "
+                    f"({tenant.ext_min}-{tenant.ext_max})"
+                )
+
+        valid = len(errors) == 0
+
+        logger.info(
+            f"Configuration validation: {'PASSED' if valid else 'FAILED'} "
+            f"({len(errors)} errors, {len(warnings)} warnings)"
+        )
+
+        return {
+            "valid": valid,
+            "errors": errors,
+            "warnings": warnings,
+        }
+
+    @staticmethod
+    def backup_configuration(config_files: List[str]) -> Optional[str]:
+        """
+        Backup configuration files before applying changes.
+
+        Args:
+            config_files: List of file paths to backup
+
+        Returns:
+            str: Backup directory path, or None if backup failed
+        """
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        backup_path = ApplyService.BACKUP_DIR / timestamp
+
+        try:
+            # Create backup directory
+            backup_path.mkdir(parents=True, exist_ok=True)
+
+            # Copy each config file to backup directory
+            for config_file in config_files:
+                if os.path.exists(config_file):
+                    dest_file = backup_path / Path(config_file).name
+                    shutil.copy2(config_file, dest_file)
+                    logger.info(f"Backed up {config_file} to {dest_file}")
+
+            logger.info(f"Configuration backup created at {backup_path}")
+            return str(backup_path)
+
+        except Exception as e:
+            logger.error(f"Failed to backup configuration: {str(e)}")
+            return None
+
+    @staticmethod
+    def rollback_configuration(backup_path: str, config_files: List[str]) -> bool:
+        """
+        Rollback configuration from backup.
+
+        Args:
+            backup_path: Path to backup directory
+            config_files: List of config file paths to restore
+
+        Returns:
+            bool: True if rollback successful, False otherwise
+        """
+        try:
+            backup_dir = Path(backup_path)
+
+            if not backup_dir.exists():
+                logger.error(f"Backup directory not found: {backup_path}")
+                return False
+
+            # Restore each config file from backup
+            for config_file in config_files:
+                backup_file = backup_dir / Path(config_file).name
+
+                if backup_file.exists():
+                    shutil.copy2(backup_file, config_file)
+                    logger.info(f"Restored {config_file} from backup")
+                else:
+                    logger.warning(f"Backup file not found: {backup_file}")
+
+            logger.info(f"Configuration rolled back from {backup_path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to rollback configuration: {str(e)}")
+            return False
 
     @staticmethod
     def apply_configuration(session: Session, triggered_by: str) -> Dict[str, Any]:

@@ -60,6 +60,3 @@ Thumbs.db
 *.sqlite
 *.sqlite3
 
-# Alembic
-alembic.ini
-
