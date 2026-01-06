@@ -6,7 +6,20 @@ Base = declarative_base()
 
 from .tenant import Tenant
 from .user import User
-from .extension import Extension
-from .apply_audit_log import ApplyAuditLog
+from .audit_log import AuditLog
+from .apply_audit_log import ApplyJob, ApplyAuditLog  # ApplyAuditLog is alias for backward compat
+from .phone_number import PhoneNumber, PhoneNumberStatus
+from .did_assignment import DIDAssignment, AssignmentType
 
-__all__ = ["Base", "Tenant", "User", "Extension", "ApplyAuditLog"]
+__all__ = [
+    "Base",
+    "Tenant",
+    "User",
+    "AuditLog",
+    "ApplyJob",
+    "ApplyAuditLog",
+    "PhoneNumber",
+    "PhoneNumberStatus",
+    "DIDAssignment",
+    "AssignmentType",
+]
