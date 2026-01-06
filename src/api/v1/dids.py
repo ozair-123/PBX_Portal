@@ -96,7 +96,7 @@ async def import_dids(
         imported_count, errors = DIDService.import_dids(
             db=db,
             dids=import_request.dids,
-            actor_id=current_user.id,
+            actor_id=UUID(current_user["user_id"]),
             source_ip=source_ip,
             user_agent=user_agent
         )
@@ -177,7 +177,7 @@ async def allocate_did(
             db=db,
             phone_number_id=phone_number_id,
             tenant_id=allocate_request.tenant_id,
-            actor_id=current_user.id,
+            actor_id=UUID(current_user["user_id"]),
             source_ip=source_ip,
             user_agent=user_agent
         )
@@ -256,7 +256,7 @@ async def assign_did(
             )
 
         # Authorization check: tenant admin can only assign DIDs in their tenant
-        if phone_number.tenant_id != current_user.tenant_id:
+        if str(phone_number.tenant_id) != current_user.get("tenant_id"):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You can only assign DIDs within your tenant"
@@ -269,7 +269,7 @@ async def assign_did(
             assigned_type=assign_request.assigned_type,
             assigned_id=assign_request.assigned_id,
             assigned_value=assign_request.assigned_value,
-            actor_id=current_user.id,
+            actor_id=UUID(current_user["user_id"]),
             source_ip=source_ip,
             user_agent=user_agent
         )
@@ -348,7 +348,7 @@ async def unassign_did(
             )
 
         # Authorization check: tenant admin can only unassign DIDs in their tenant
-        if phone_number.tenant_id != current_user.tenant_id:
+        if str(phone_number.tenant_id) != current_user.get("tenant_id"):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You can only unassign DIDs within your tenant"
@@ -358,7 +358,7 @@ async def unassign_did(
         phone_number = DIDService.unassign(
             db=db,
             phone_number_id=phone_number_id,
-            actor_id=current_user.id,
+            actor_id=UUID(current_user["user_id"]),
             source_ip=source_ip,
             user_agent=user_agent
         )

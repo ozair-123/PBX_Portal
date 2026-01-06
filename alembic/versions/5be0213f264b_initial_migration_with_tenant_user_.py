@@ -19,24 +19,20 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Create TenantStatus enum
-    tenant_status_enum = postgresql.ENUM('active', 'suspended', name='tenantstatus', create_type=True)
+    # Create enum types (create_type=False to prevent automatic creation, we create them manually)
+    tenant_status_enum = postgresql.ENUM('active', 'suspended', name='tenantstatus', create_type=False)
     tenant_status_enum.create(op.get_bind(), checkfirst=True)
 
-    # Create UserRole enum
-    user_role_enum = postgresql.ENUM('platform_admin', 'tenant_admin', 'support', 'end_user', name='userrole', create_type=True)
+    user_role_enum = postgresql.ENUM('platform_admin', 'tenant_admin', 'support', 'end_user', name='userrole', create_type=False)
     user_role_enum.create(op.get_bind(), checkfirst=True)
 
-    # Create UserStatus enum
-    user_status_enum = postgresql.ENUM('active', 'suspended', 'deleted', name='userstatus', create_type=True)
+    user_status_enum = postgresql.ENUM('active', 'suspended', 'deleted', name='userstatus', create_type=False)
     user_status_enum.create(op.get_bind(), checkfirst=True)
 
-    # Create AuditAction enum
-    audit_action_enum = postgresql.ENUM('CREATE', 'UPDATE', 'DELETE', 'LOGIN', 'LOGOUT', 'APPLY', name='auditaction', create_type=True)
+    audit_action_enum = postgresql.ENUM('CREATE', 'UPDATE', 'DELETE', 'LOGIN', 'LOGOUT', 'APPLY', name='auditaction', create_type=False)
     audit_action_enum.create(op.get_bind(), checkfirst=True)
 
-    # Create ApplyStatus enum
-    apply_status_enum = postgresql.ENUM('PENDING', 'RUNNING', 'SUCCESS', 'FAILED', 'ROLLED_BACK', name='applystatus', create_type=True)
+    apply_status_enum = postgresql.ENUM('PENDING', 'RUNNING', 'SUCCESS', 'FAILED', 'ROLLED_BACK', name='applystatus', create_type=False)
     apply_status_enum.create(op.get_bind(), checkfirst=True)
 
     # Create tenants table (no foreign keys, so create first)

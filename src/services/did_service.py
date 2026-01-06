@@ -113,16 +113,17 @@ class DIDService:
             # Flush to get IDs before audit logging
             db.flush()
 
-            # Step 4: Audit logging
+            # Step 4: Audit logging (use special UUID for bulk operations)
+            from uuid import uuid4
+            bulk_operation_id = uuid4()
             AuditService.log_create(
-                db=db,
+                session=db,
                 entity_type="phone_number",
-                entity_id=None,  # Bulk operation, no single ID
+                entity_id=bulk_operation_id,  # Bulk operation uses generated UUID
                 actor_id=actor_id,
                 source_ip=source_ip,
                 user_agent=user_agent,
-                description=f"Bulk imported {created_count} DIDs",
-                metadata={
+                after_state={
                     "count": created_count,
                     "numbers": numbers[:100]  # Log first 100 for reference
                 }
@@ -193,7 +194,7 @@ class DIDService:
 
         # Audit logging
         AuditService.log_update(
-            db=db,
+            session=db,
             entity_type="phone_number",
             entity_id=phone_number_id,
             actor_id=actor_id,
@@ -201,7 +202,6 @@ class DIDService:
             user_agent=user_agent,
             before_state=before_state,
             after_state=after_state,
-            description=f"Allocated {phone_number.number} to tenant {tenant_id}"
         )
 
         db.commit()
@@ -266,7 +266,7 @@ class DIDService:
 
         # Audit logging
         AuditService.log_update(
-            db=db,
+            session=db,
             entity_type="phone_number",
             entity_id=phone_number_id,
             actor_id=actor_id,
@@ -274,7 +274,6 @@ class DIDService:
             user_agent=user_agent,
             before_state=before_state,
             after_state=after_state,
-            description=f"Deallocated {phone_number.number}"
         )
 
         db.commit()
@@ -380,14 +379,13 @@ class DIDService:
 
             # Audit logging
             AuditService.log_create(
-                db=db,
+                session=db,
                 entity_type="did_assignment",
                 entity_id=assignment.id,
                 actor_id=actor_id,
                 source_ip=source_ip,
                 user_agent=user_agent,
-                description=f"Assigned {phone_number.number} to {assigned_type.value}",
-                metadata={
+                after_state={
                     "phone_number": phone_number.number,
                     "assigned_type": assigned_type.value,
                     "assigned_id": str(assigned_id) if assigned_id else None,
@@ -478,13 +476,12 @@ class DIDService:
 
         # Audit logging
         AuditService.log_delete(
-            db=db,
+            session=db,
             entity_type="did_assignment",
             entity_id=assignment.id,
             actor_id=actor_id,
             source_ip=source_ip,
             user_agent=user_agent,
-            description=f"Unassigned {phone_number.number}",
             metadata={
                 "phone_number": phone_number.number,
                 "previous_assignment": assignment_data
