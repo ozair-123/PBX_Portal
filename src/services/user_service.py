@@ -299,6 +299,9 @@ class UserService:
             query = query.filter(User.tenant_id == tenant_id)
         if status:
             query = query.filter(User.status == UserStatus[status])
+        else:
+            # By default, exclude deleted users
+            query = query.filter(User.status != UserStatus.deleted)
         if role:
             query = query.filter(User.role == UserRole[role])
 

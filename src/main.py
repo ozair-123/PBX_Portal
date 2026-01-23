@@ -10,7 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from .config import Config
-from .middleware.auth import AuthenticationMiddleware
+# from .middleware.auth import AuthenticationMiddleware  # TODO: Implement auth middleware
 
 # Configure logging
 logging.basicConfig(
@@ -39,7 +39,7 @@ app.add_middleware(
 )
 
 # Add authentication middleware
-app.add_middleware(AuthenticationMiddleware)
+# app.add_middleware(AuthenticationMiddleware)  # TODO: Implement auth middleware
 
 
 # Error handlers

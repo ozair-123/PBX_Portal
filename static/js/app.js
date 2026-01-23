@@ -21,6 +21,11 @@ document.addEventListener('DOMContentLoaded', function() {
     deleteModal = new bootstrap.Modal(document.getElementById('deleteModal'));
     applyModal = new bootstrap.Modal(document.getElementById('applyModal'));
 
+    // Load tenants when Add User modal is shown
+    document.getElementById('addUserModal').addEventListener('show.bs.modal', function() {
+        loadTenantDropdown();
+    });
+
     // Load initial data
     refreshUsers();
     loadApplyHistory();
@@ -35,7 +40,7 @@ document.addEventListener('DOMContentLoaded', function() {
  */
 async function fetchUsers() {
     try {
-        const response = await fetch(`${API_BASE_URL}/users`);
+        const response = await fetch(`${API_BASE_URL}/api/v1/users`);
 
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -51,16 +56,58 @@ async function fetchUsers() {
 }
 
 /**
+ * Fetch all tenants for dropdown
+ */
+async function fetchTenants() {
+    try {
+        const response = await fetch(`${API_BASE_URL}/api/v1/tenants`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        const data = await response.json();
+        return data.tenants || [];
+    } catch (error) {
+        console.error('Error fetching tenants:', error);
+        return [];
+    }
+}
+
+/**
+ * Load tenants into the user form dropdown
+ */
+async function loadTenantDropdown() {
+    const tenants = await fetchTenants();
+    const select = document.getElementById('userTenant');
+    if (!select) return;
+
+    // Clear existing options except the first one
+    select.innerHTML = '<option value="">Select a tenant...</option>';
+
+    tenants.forEach(tenant => {
+        const option = document.createElement('option');
+        option.value = tenant.id;
+        option.textContent = tenant.name;
+        select.appendChild(option);
+    });
+}
+
+/**
  * Create a new user
  */
-async function createUserAPI(name, email) {
+async function createUserAPI(tenantId, name, email, password, role) {
     try {
-        const response = await fetch(`${API_BASE_URL}/users`, {
+        const response = await fetch(`${API_BASE_URL}/api/v1/users`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ name, email })
+            body: JSON.stringify({
+                tenant_id: tenantId,
+                name: name,
+                email: email,
+                password: password,
+                role: role || 'end_user'
+            })
         });
 
         if (!response.ok) {
@@ -81,13 +128,18 @@ async function createUserAPI(name, email) {
  */
 async function deleteUserAPI(userId) {
     try {
-        const response = await fetch(`${API_BASE_URL}/users/${userId}`, {
+        const response = await fetch(`${API_BASE_URL}/api/v1/users/${userId}`, {
             method: 'DELETE'
         });
 
         if (!response.ok) {
             const errorData = await response.json();
             throw new Error(errorData.detail || 'Failed to delete user');
+        }
+
+        // 204 No Content returns empty body
+        if (response.status === 204) {
+            return { success: true };
         }
 
         const data = await response.json();
@@ -103,7 +155,7 @@ async function deleteUserAPI(userId) {
  */
 async function applyConfigurationAPI() {
     try {
-        const response = await fetch(`${API_BASE_URL}/apply`, {
+        const response = await fetch(`${API_BASE_URL}/api/v1/apply`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -139,7 +191,7 @@ async function applyConfigurationAPI() {
  */
 async function getApplyHistory() {
     try {
-        const response = await fetch(`${API_BASE_URL}/apply/history`);
+        const response = await fetch(`${API_BASE_URL}/api/v1/apply?page_size=20`);
 
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -216,9 +268,8 @@ function renderUsersTable(users) {
     }
 
     tbody.innerHTML = users.map(user => {
-        const extension = user.extension || {};
-        const extensionNumber = extension.number || 'N/A';
-        const secret = extension.secret || 'N/A';
+        // Extension is a plain number from API
+        const extensionNumber = user.extension || 'N/A';
         const createdDate = new Date(user.created_at).toLocaleString();
 
         return `
@@ -232,11 +283,6 @@ function renderUsersTable(users) {
                     <small class="text-muted">${createdDate}</small>
                 </td>
                 <td class="text-end">
-                    <button class="btn btn-sm btn-outline-secondary btn-action"
-                            onclick="copySecret('${secret}')"
-                            title="Copy SIP Secret">
-                        <i class="fas fa-key"></i>
-                    </button>
                     <button class="btn btn-sm btn-danger btn-action"
                             onclick="showDeleteModal('${user.id}', '${escapeHtml(user.name)}', '${escapeHtml(user.email)}', '${extensionNumber}')"
                             title="Delete User">
@@ -264,7 +310,7 @@ function filterUsers() {
     const filtered = allUsers.filter(user => {
         const name = (user.name || '').toLowerCase();
         const email = (user.email || '').toLowerCase();
-        const extension = (user.extension?.number || '').toString();
+        const extension = (user.extension || '').toString();
 
         return name.includes(searchTerm) ||
                email.includes(searchTerm) ||
@@ -300,8 +346,8 @@ function sortTable(column) {
                 bVal = b.email.toLowerCase();
                 break;
             case 'extension':
-                aVal = a.extension?.number || 0;
-                bVal = b.extension?.number || 0;
+                aVal = a.extension || 0;
+                bVal = b.extension || 0;
                 break;
             case 'created':
                 aVal = new Date(a.created_at).getTime();
@@ -360,12 +406,21 @@ function showAddUserModal() {
 async function createUser(event) {
     event.preventDefault();
 
+    const tenantId = document.getElementById('userTenant').value;
     const name = document.getElementById('userName').value.trim();
     const email = document.getElementById('userEmail').value.trim();
+    const password = document.getElementById('userPassword').value;
+    const role = document.getElementById('userRole').value;
     const errorDiv = document.getElementById('addUserError');
 
-    if (!name || !email) {
+    if (!tenantId || !name || !email || !password) {
         errorDiv.textContent = 'Please fill in all required fields';
+        errorDiv.classList.remove('d-none');
+        return;
+    }
+
+    if (password.length < 8) {
+        errorDiv.textContent = 'Password must be at least 8 characters';
         errorDiv.classList.remove('d-none');
         return;
     }
@@ -380,13 +435,17 @@ async function createUser(event) {
             submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i> Creating...';
         }
 
-        const result = await createUserAPI(name, email);
+        const result = await createUserAPI(tenantId, name, email, password, role);
 
         // Close modal
         addUserModal.hide();
 
+        // Clear form
+        document.getElementById('addUserForm').reset();
+        errorDiv.classList.add('d-none');
+
         // Show success message
-        showToast('Success', `User created with extension ${result.extension.number}`, 'success');
+        showToast('Success', `User "${name}" created successfully`, 'success');
 
         // Refresh table
         await refreshUsers();
@@ -421,13 +480,13 @@ async function confirmDelete() {
     if (!deleteUserId) return;
 
     try {
-        const result = await deleteUserAPI(deleteUserId);
+        await deleteUserAPI(deleteUserId);
 
         // Close modal
         deleteModal.hide();
 
         // Show success message
-        showToast('Deleted', `Extension ${result.freed_extension} has been freed`, 'success');
+        showToast('Deleted', 'User deleted successfully', 'success');
 
         // Refresh table
         await refreshUsers();

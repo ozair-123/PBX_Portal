@@ -198,7 +198,7 @@ class EnhancedApplyService:
 
             # Step 7: Reload Asterisk via AMI
             logger.info(f"Apply job {apply_job.id}: Reloading Asterisk")
-            reload_success = asyncio.run(EnhancedApplyService._reload_asterisk())
+            reload_success = EnhancedApplyService._reload_asterisk()
 
             if not reload_success:
                 # Rollback on reload failure
@@ -243,7 +243,7 @@ class EnhancedApplyService:
                 logger.info(f"Apply job {apply_job.id}: Released lock")
 
     @staticmethod
-    async def _reload_asterisk() -> bool:
+    def _reload_asterisk() -> bool:
         """
         Reload Asterisk dialplan via AMI.
 
@@ -254,18 +254,18 @@ class EnhancedApplyService:
 
         try:
             # Connect to AMI
-            connected = await ami.connect()
+            connected = ami.connect()
             if not connected:
                 logger.error("Failed to connect to Asterisk AMI")
                 return False
 
             # Reload dialplan
-            result = await ami.reload_dialplan()
+            result = ami.reload("dialplan")
 
             # Disconnect
-            await ami.disconnect()
+            ami.disconnect()
 
-            return result.get("success", False)
+            return result
 
         except Exception as e:
             logger.error(f"Error reloading Asterisk: {str(e)}")

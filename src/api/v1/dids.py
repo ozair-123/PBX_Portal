@@ -3,6 +3,7 @@ from typing import Annotated
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from src.auth.rbac import require_role, get_current_user
 from src.models.user import User
@@ -19,6 +20,85 @@ from src.database import get_db
 
 
 router = APIRouter()
+
+
+@router.get(
+    "/",
+    summary="List all DIDs",
+    description="Get list of all phone numbers with their status, tenant, and assignment details"
+)
+async def list_dids(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)]
+):
+    """
+    List all DIDs with enriched data.
+
+    Returns phone numbers with:
+    - Basic info (number, status, provider)
+    - Tenant information (if allocated/assigned)
+    - Assignment details (if assigned)
+    - User information (if assigned to user)
+    """
+    from src.models import PhoneNumber, Tenant, DIDAssignment
+
+    # Query phone numbers with left joins for related data
+    query = db.query(PhoneNumber).outerjoin(
+        Tenant, PhoneNumber.tenant_id == Tenant.id
+    ).outerjoin(
+        DIDAssignment, PhoneNumber.id == DIDAssignment.phone_number_id
+    ).outerjoin(
+        User, DIDAssignment.assigned_id == User.id
+    )
+
+    phone_numbers = query.all()
+
+    # Enrich with related data
+    result = []
+    for pn in phone_numbers:
+        phone_dict = {
+            "id": str(pn.id),
+            "number": pn.number,
+            "status": pn.status.value,
+            "provider": pn.provider,
+            "provider_metadata": pn.provider_metadata,
+            "tenant_id": str(pn.tenant_id) if pn.tenant_id else None,
+            "tenant_name": None,
+            "assigned_type": None,
+            "assigned_id": None,
+            "assigned_value": None,
+            "assigned_user_name": None,
+            "assigned_extension": None,
+            "created_at": pn.created_at.isoformat() if pn.created_at else None,
+            "updated_at": pn.updated_at.isoformat() if pn.updated_at else None,
+        }
+
+        # Add tenant info
+        if pn.tenant_id:
+            tenant = db.query(Tenant).filter(Tenant.id == pn.tenant_id).first()
+            if tenant:
+                phone_dict["tenant_name"] = tenant.name
+
+        # Add assignment info
+        assignment = db.query(DIDAssignment).filter(
+            DIDAssignment.phone_number_id == pn.id
+        ).first()
+
+        if assignment:
+            phone_dict["assigned_type"] = assignment.assigned_type.value
+            phone_dict["assigned_id"] = str(assignment.assigned_id) if assignment.assigned_id else None
+            phone_dict["assigned_value"] = assignment.assigned_value
+
+            # If assigned to user, get user details
+            if assignment.assigned_type.value == "USER" and assignment.assigned_id:
+                user = db.query(User).filter(User.id == assignment.assigned_id).first()
+                if user:
+                    phone_dict["assigned_user_name"] = user.name
+                    phone_dict["assigned_extension"] = user.extension
+
+        result.append(phone_dict)
+
+    return {"phone_numbers": result}
 
 
 @router.post(
@@ -256,11 +336,13 @@ async def assign_did(
             )
 
         # Authorization check: tenant admin can only assign DIDs in their tenant
-        if str(phone_number.tenant_id) != current_user.get("tenant_id"):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You can only assign DIDs within your tenant"
-            )
+        # Platform admins can assign DIDs for any tenant
+        if current_user.get("role") != "platform_admin":
+            if str(phone_number.tenant_id) != current_user.get("tenant_id"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You can only assign DIDs within your tenant"
+                )
 
         # Call DIDService to perform assignment
         assignment = DIDService.assign_to_destination(
@@ -348,11 +430,13 @@ async def unassign_did(
             )
 
         # Authorization check: tenant admin can only unassign DIDs in their tenant
-        if str(phone_number.tenant_id) != current_user.get("tenant_id"):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You can only unassign DIDs within your tenant"
-            )
+        # Platform admins can unassign DIDs for any tenant
+        if current_user.get("role") != "platform_admin":
+            if str(phone_number.tenant_id) != current_user.get("tenant_id"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You can only unassign DIDs within your tenant"
+                )
 
         # Call DIDService to perform unassignment
         phone_number = DIDService.unassign(
